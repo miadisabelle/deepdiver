@@ -71,6 +71,7 @@ On gaia, Chrome 154, a clone of the AVA profile (`ava@jgwill.com`):
 
 - Notebook `773f480c-0ab7-4eac-b106-bf7c7c0251e8`: `studio download` saved all six downloadable artifacts (two videos, three audios, one infographic). Their ffprobe durations match the Studio cards. The Mind Map card was reported as having no Download item.
 - Notebook `78507190-4018-41c6-9fe0-47ed17df5300`, made for this test: created with review `f9d6fb1e` as a Markdown file, then `https://youtu.be/q4I55OAkI0Y` (the screenwalk that review covers) as a second source. An Infographic generated from both, *From Screenwalk to Studio Media: The Deep Diver Pipeline*, downloaded as a 2752×1536 PNG. Mind Maps generated and were recognised as new cards. An Interactive report with a prompt (*The Miadi Media Engine: Transforming Screenwalks into Notebook Artifacts*) and a Document report from the Briefing Doc template (*Executive Briefing: …*) generated, and `studio download` saved all four reports in the notebook, two of them Guillaume's, as Markdown and HTML. `notebook ask` returned a cited answer, and `studio open` opened the newest report.
+- Notebook `0ae51b4c-8ed2-4ee2-a641-2c7e88b7e2ea`, Episode 550's screenwalk practice: reviews `d64a2fdf`, `6c3f477f`, `b2558ceb` and `6a2b5b59` as Markdown, their four videos in one insert, and the stored transcript of screenwalk `2610061207`. Two of the videos, uploaded that day, could not be imported ("Transcript not available"), and the transcript stood in for one of them. Two questions were answered with citations (`asked.md`). An infographic (*Screenwalk Lifecycle Process Diagram*), a Video Overview (*How Screenwalks Transform Developer Captures*, a 69-second vertical Short that took 17 minutes) and an Interactive report embedding both were generated and downloaded.
 
 ## What the interface changed, and what was fixed
 
@@ -87,6 +88,9 @@ On gaia, Chrome 154, a clone of the AVA profile (`ava@jgwill.com`):
 | a card has no DOM id; its UUID sits in an inner `artifact-labels-<uuid>` | a repeat generation returned an older card |
 | Reports open a "Create report" dialog with formats, templates and a Customize form; cards say "Report" | Reports could not be generated |
 | reports have no Download | reports could not be kept |
+| Video Overview formats are Short (9:16) and Explainer (16:9) | the "Brief" format was not found |
+| an open file picker makes Chrome block `window.open` | downloads after a file upload did not start |
+| a same-day YouTube video has no transcript | the URL was counted as a source |
 
 A search for an "Add" button also matched the header's "Create notebook" button, whose icon renders as the text `add_2`. Three empty notebooks named "Untitled notebook" were created in the AVA account that way on 2026-10-06. The selector is fixed, and those notebooks are still there.
 

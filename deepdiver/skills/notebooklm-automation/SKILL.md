@@ -113,6 +113,16 @@ Artifact types for `studio generate`: `audio_overview`, `slide_deck`,
   disabled (`.mat-mdc-button-disabled`). Card identity is the UUID in its
   inner `id="artifact-labels-<uuid>"`, never the details line, which
   carries a relative time.
+- **A file picker blocks downloads.** Clicking "Upload files" opens the
+  native picker (through the desktop portal). While it is open, Chrome
+  blocks `window.open`, which every Studio Download uses ("window.open
+  blocked due to active file chooser"). DeepDiver sets files on the hidden
+  `input[name="Filedata"]` when it exists, intercepts the picker otherwise,
+  and names this cause when a download does not start. Close a stray
+  "Open Files" window before downloading.
+- **Video Overview formats are Short (9:16) and Explainer (16:9).** "Brief"
+  became Short. A one-minute Short took 17 minutes to generate; the
+  default timeout is 1800 s.
 - **Mind Map cards say only "Artifact".** Their `aria-description` is
   generic; the `.artifact-icon` symbol (`flowchart`) names the family.
 - **Host moved.** `notebooklm.google.com` redirects to

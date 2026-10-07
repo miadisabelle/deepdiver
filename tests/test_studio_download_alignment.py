@@ -251,3 +251,18 @@ def test_resolve_new_artifact_falls_back_when_nothing_added():
         automator._resolve_new_artifact(detected, 'audio_overview', 1, {'k-old'})
     )
     assert resolved is detected
+
+
+def test_resolve_new_artifact_diffs_on_first_card_of_a_family():
+    """No earlier card of the family: the family's own new card wins over
+    whatever the completion selectors matched first (another family's card)."""
+    automator = NotebookLMAutomator()
+    report = {'artifact_id': 'report-1', 'title': 'Mastering the Miadi Screenwalk', 'card_key': 'artifact:report-1'}
+    automator._completed_card_snapshot = AsyncMock(return_value=[report])
+    detected = {'artifact_id': 'video-1', 'title': 'How Screenwalks Transform Developer Captures'}
+
+    resolved = asyncio.run(
+        automator._resolve_new_artifact(detected, 'reports', 0, set())
+    )
+    assert resolved['title'] == 'Mastering the Miadi Screenwalk'
+    assert 'card_key' not in resolved

@@ -68,10 +68,9 @@ STUDIO_SETTINGS:
     generation_timeout: 600          # 10 minutes (seconds)
     polling_interval: 5              # Check status every 5 seconds
   video_overview:
-    default_format: explainer        # explainer, brief
-    default_visual_style: auto       # auto, classic, whiteboard, kawaii, anime, etc.
+    default_format: explainer        # explainer (16:9), short (9:16)
     default_language: English
-    generation_timeout: 600
+    generation_timeout: 1800         # a 1-minute Short took 17 minutes on 2026-10-06
   slide_deck:
     default_format: presenter        # presenter (spoken deck), detailed (dense leave-behind)
     default_language: English

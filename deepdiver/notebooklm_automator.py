@@ -758,6 +758,16 @@ class NotebookLMAutomator:
                 return
             done.set_result(event)
 
+        console_lines: List[str] = []
+
+        def on_console(message):
+            try:
+                console_lines.append(message.text)
+            except Exception:
+                pass
+
+        if self.page:
+            self.page.on('console', on_console)
         cdp = await self.browser.new_browser_cdp_session()
         try:
             cdp.on('Browser.downloadWillBegin', on_begin)
@@ -773,6 +783,9 @@ class NotebookLMAutomator:
             try:
                 start = await asyncio.wait_for(began, start_timeout)
             except asyncio.TimeoutError:
+                if any('active file chooser' in line for line in console_lines):
+                    return None, ('download blocked: a file picker is open in Chrome '
+                                  '(close the "Open Files" window, then retry)')
                 return None, 'download did not start'
             suggested = start.get('suggestedFilename') or ''
             self.logger.info(f"📥 Browser suggested filename: {suggested}")
@@ -799,6 +812,11 @@ class NotebookLMAutomator:
                 return None, 'download finished but the file is empty'
             return final_path, None
         finally:
+            if self.page:
+                try:
+                    self.page.remove_listener('console', on_console)
+                except Exception:
+                    pass
             try:
                 await cdp.detach()
             except Exception:
@@ -1239,8 +1257,31 @@ class NotebookLMAutomator:
                 # Direct file input element
                 await upload_element.set_input_files(file_path)
             else:
-                # Click upload button to activate file dialog
-                await upload_element.click()
+                # Prefer the hidden input the button drives, without clicking
+                # the button. Clicking opens the native picker (through the
+                # desktop portal, even with Playwright's interception), it stays
+                # open after the files are set, and while it is open Chrome
+                # blocks window.open, the call every Studio Download uses
+                # ("window.open blocked due to active file chooser", 2026-10-06).
+                hidden_input = await self.page.query_selector('input[type="file"][name="Filedata"]')
+                if hidden_input:
+                    await hidden_input.set_input_files(file_path)
+                    self.logger.info("✅ File set on the hidden input, no picker opened")
+                    await self.page.wait_for_timeout(5000)
+                    self.logger.info("✅ Document upload completed")
+                    self.logger.info(f"📋 Uploaded to notebook: {current_notebook_id}")
+                    return current_notebook_id
+                try:
+                    async with self.page.expect_file_chooser(timeout=5000) as chooser_info:
+                        await upload_element.click()
+                    chooser = await chooser_info.value
+                    await chooser.set_files(file_path)
+                    self.logger.warning("⚠️ Uploaded through the file picker; if a picker window "
+                                        "stays open, Studio downloads are blocked until it is closed")
+                    await self.page.wait_for_timeout(5000)
+                    return current_notebook_id
+                except Exception as e:
+                    self.logger.info(f"ℹ️ No file chooser opened ({e}); using the hidden input")
                 await self.page.wait_for_timeout(1000)
 
                 # Find hidden file input (NotebookLM uses hidden input with aria-hidden="true")
@@ -2458,7 +2499,10 @@ class NotebookLMAutomator:
         set against ``baseline_keys`` and return the ADDED card so session
         tracking never binds a fresh generation to a stale artifact's id/title.
         """
-        if baseline_count > 0 and baseline_keys is not None:
+        # Diff even when the family had no card before: ``detected`` comes
+        # from completion selectors whose generic fallbacks can match another
+        # family's card (a report run once returned the video beside it).
+        if baseline_keys is not None:
             snapshot = await self._completed_card_snapshot(artifact_type)
             added = [c for c in snapshot if c.get('card_key') not in baseline_keys]
             if added:
@@ -2816,7 +2860,8 @@ class NotebookLMAutomator:
     async def _close_dialogs(self) -> None:
         """Close any open dialog by its Close button."""
         for _ in range(3):
-            close = self.page.get_by_role('dialog').locator('button[aria-label="Close"]')
+            close = self.page.get_by_role('dialog').locator(
+                'button[aria-label="Close"], button[aria-label="Close dialog"]')
             if await close.count() == 0:
                 return
             try:

@@ -68,9 +68,12 @@ ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     'video_overview': {
         'label': 'Video Overview',
         'icon': 'videocam',
+        # Observed 2026-10-06: Short (9:16, "a bite-sized overview") and
+        # Explainer (16:9). "Brief" was the earlier name of the short one.
         'formats': {
             'explainer': 'Explainer',
-            'brief': 'Brief',
+            'short': 'Short',
+            'brief': 'Short',
         },
         'supports_language': True,
         'supports_length': False,
