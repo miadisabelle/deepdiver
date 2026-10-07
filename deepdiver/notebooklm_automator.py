@@ -24,8 +24,10 @@ import yaml
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 from .studio_artifacts import (
+    ARTIFACT_CARD_SELECTOR,
     ARTIFACT_TYPES,
     completed_card_selectors,
+    family_label_from_icon,
     get_artifact_spec,
     normalize_artifact_format,
     normalize_artifact_type,
@@ -52,6 +54,23 @@ LANGUAGE_DISPLAY_MAP = {
     'finnish': 'suomi',
     'czech': 'čeština'
 }
+
+
+# notebooklm.google.com now redirects to notebook.google.com (Gemini Notebook
+# rebrand); both hosts serve the same app.
+NOTEBOOKLM_HOSTS = ('notebooklm.google.com', 'notebook.google.com')
+
+
+def _is_notebooklm_host(url: Optional[str]) -> bool:
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url or '').hostname in NOTEBOOKLM_HOSTS
+    except Exception:
+        return False
+
+
+def _is_notebook_url(url: Optional[str]) -> bool:
+    return _is_notebooklm_host(url) and '/notebook/' in (url or '')
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -359,6 +378,11 @@ def launch_chrome_cdp(port: int = 9222, user_data_dir: str = None,
     ]
     if profile_directory:
         cmd.append(f'--profile-directory={profile_directory}')
+    # A cloned or fresh user-data-dir has no 'First Run' sentinel; without
+    # these flags Chrome opens its Terms of Service window and the DevTools
+    # server never starts.
+    cmd.append('--no-first-run')
+    cmd.append('--no-default-browser-check')
     cmd.append('--new-window')
     cmd.append('about:blank')
 
@@ -571,7 +595,7 @@ class NotebookLMAutomator:
                             return page
             for context in self.browser.contexts:
                 for page in context.pages:
-                    if 'notebooklm.google.com/notebook/' in (page.url or ''):
+                    if _is_notebook_url(page.url):
                         return page
         except Exception as e:
             self.logger.debug(f"find_open_notebook_page failed: {e}")
@@ -599,9 +623,11 @@ class NotebookLMAutomator:
         if not self.page:
             return False
 
+        # Never a page-wide aria-label="More": the source list renders one per
+        # source row before the Studio panel, so it opens a source's menu.
         menu_button_selectors = [
             'button[aria-label="See more options for audio player"]',
-            'button[aria-label="More"]',
+            'button[aria-label="More options"]',
         ]
 
         for selector in menu_button_selectors:
@@ -654,6 +680,7 @@ class NotebookLMAutomator:
             '[role="menuitem"]:has-text("Download")',
             'button[role="menuitem"]:has-text("Download")',
             'button:has-text("Download")',
+            'button[aria-label="Download"]',
             '[data-testid="download-button"]',
             '.download-button',
         ]
@@ -673,6 +700,164 @@ class NotebookLMAutomator:
                 return selector, element
 
         return None, None
+
+    async def _capture_download(self, trigger, output_path: str,
+                                timeout: Optional[int] = None,
+                                start_timeout: int = 60):
+        """
+        Run ``trigger()`` and save the download it starts.
+
+        The current Studio UI starts downloads outside any page frame that
+        Playwright tracks, so ``page.expect_download()`` never fires even
+        though Chrome saves the file. Browser-level CDP download events see
+        every download: Chrome writes it into the output directory under its
+        GUID, and it is renamed to the caller's stem plus the extension of the
+        browser's suggested filename, so the name never lies about the
+        container.
+
+        Returns:
+            (saved_path, None) on success, (None, reason) otherwise.
+        """
+        if not self.browser:
+            return None, 'no browser connection'
+        if timeout is None:
+            timeout = self.config.get('STUDIO_SETTINGS', {}).get('download_timeout', 600)
+
+        out_dir = os.path.abspath(os.path.dirname(output_path) or '.')
+        os.makedirs(out_dir, exist_ok=True)
+
+        loop = asyncio.get_running_loop()
+        began = loop.create_future()
+        done = loop.create_future()
+
+        def on_begin(event):
+            if not began.done():
+                began.set_result(event)
+
+        def on_progress(event):
+            if event.get('state') not in ('completed', 'canceled') or done.done():
+                return
+            if began.done() and event.get('guid') != began.result().get('guid'):
+                return
+            done.set_result(event)
+
+        cdp = await self.browser.new_browser_cdp_session()
+        try:
+            cdp.on('Browser.downloadWillBegin', on_begin)
+            cdp.on('Browser.downloadProgress', on_progress)
+            await cdp.send('Browser.setDownloadBehavior', {
+                'behavior': 'allowAndName',
+                'downloadPath': out_dir,
+                'eventsEnabled': True,
+            })
+
+            await trigger()
+
+            try:
+                start = await asyncio.wait_for(began, start_timeout)
+            except asyncio.TimeoutError:
+                return None, 'download did not start'
+            suggested = start.get('suggestedFilename') or ''
+            self.logger.info(f"📥 Browser suggested filename: {suggested}")
+
+            try:
+                progress = await asyncio.wait_for(done, timeout)
+            except asyncio.TimeoutError:
+                return None, f'download did not finish within {timeout}s'
+            if progress.get('state') != 'completed':
+                return None, 'download canceled'
+
+            temp_path = progress.get('filePath') or os.path.join(out_dir, start['guid'])
+            stem, current_ext = os.path.splitext(output_path)
+            suggested_ext = os.path.splitext(suggested)[1]
+            final_path = stem + suggested_ext if suggested_ext else output_path
+            if suggested_ext and suggested_ext.lower() != current_ext.lower() and current_ext:
+                self.logger.info(
+                    f"🔤 Adjusting extension {current_ext} → {suggested_ext} "
+                    f"to match the downloaded container"
+                )
+            shutil.move(temp_path, final_path)
+
+            if not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
+                return None, 'download finished but the file is empty'
+            return final_path, None
+        finally:
+            try:
+                await cdp.detach()
+            except Exception:
+                pass
+
+    _NOT_DOWNLOADABLE_REASONS = ('card has no More menu', 'no Download item in card menu')
+
+    async def _download_card_via_menu(self, card, output_path: str,
+                                      timeout: Optional[int] = None):
+        """
+        Download one Studio card through its own More > Download menu item.
+
+        The card-scoped menu is the one download control every downloadable
+        family shares (audio, video, infographic as of 2026-10-06), and it
+        needs no player, so it cannot act on the wrong card.
+
+        Returns:
+            (saved_path, None) on success, (None, reason) otherwise.
+        """
+        more = await card.query_selector('button[aria-label="More"]')
+        if not more:
+            return None, 'card has no More menu'
+        await more.click()
+
+        item = None
+        for selector in (
+            '[role="menu"] button:has-text("Download")',
+            '[role="menu"] [role="menuitem"]:has-text("Download")',
+            '.mat-mdc-menu-panel button:has-text("Download")',
+        ):
+            try:
+                item = await self.page.wait_for_selector(selector, timeout=2000, state='visible')
+                if item:
+                    break
+            except Exception:
+                continue
+        if not item:
+            await self.page.keyboard.press('Escape')
+            return None, 'no Download item in card menu'
+
+        return await self._capture_download(item.click, output_path, timeout=timeout)
+
+    async def _find_artifact_card(self, family_label: str, title: Optional[str] = None):
+        """
+        Locate a Studio card by title, else the newest card of a family.
+
+        The Studio list is newest-first, so without a title the first card of
+        the family is the one a generation just produced.
+        """
+        try:
+            cards = await self.page.query_selector_all(ARTIFACT_CARD_SELECTOR)
+        except Exception:
+            return None
+
+        for card in cards:
+            try:
+                if not await card.is_visible():
+                    continue
+                if title:
+                    title_el = await card.query_selector('.artifact-title')
+                    if title_el and (await title_el.inner_text()).strip() == title.strip():
+                        return card
+                    continue
+                label = None
+                described = await card.query_selector('[aria-description]')
+                if described:
+                    label = await described.get_attribute('aria-description')
+                if not get_artifact_spec(label or ''):
+                    icon_el = await card.query_selector('.artifact-icon')
+                    label = family_label_from_icon(
+                        (await icon_el.inner_text()).strip() if icon_el else None)
+                if label == family_label:
+                    return card
+            except Exception:
+                continue
+        return None
     
     async def navigate_to_notebooklm(self) -> bool:
         """
@@ -702,7 +887,7 @@ class NotebookLMAutomator:
             
             # Check if we're on the correct page
             current_url = self.page.url
-            if 'notebooklm.google.com' in current_url:
+            if _is_notebooklm_host(current_url):
                 self.logger.info("✅ Successfully navigated to NotebookLM")
                 return True
             else:
@@ -1856,6 +2041,15 @@ class NotebookLMAutomator:
                             data['family_label'] = await described.get_attribute('aria-description')
                     except Exception:
                         data['family_label'] = None
+                    # Some families (Mind Map) only carry the generic
+                    # aria-description "Artifact"; the card icon names them.
+                    if not get_artifact_spec(data.get('family_label') or ''):
+                        try:
+                            icon_el = await card.query_selector('.artifact-icon')
+                            icon = (await icon_el.inner_text()).strip() if icon_el else None
+                            data['family_label'] = family_label_from_icon(icon) or data.get('family_label')
+                        except Exception:
+                            pass
                     try:
                         play_button = await card.query_selector('button[aria-label="Play"]')
                         data['playable'] = play_button is not None
@@ -2547,9 +2741,15 @@ class NotebookLMAutomator:
         except Exception as e:
             self.logger.warning(f"⚠️ Could not ensure Sources tab: {e}")
     
-    async def download_audio(self, output_path: str) -> Optional[str]:
+    async def download_audio(self, output_path: str,
+                             artifact: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """
         Download the generated audio file.
+
+        The Audio Overview card's own More > Download menu is tried first
+        (matched by ``artifact['title']`` when given, else the newest Audio
+        Overview card). The player/overflow-menu path below remains for the
+        older UI.
 
         The final extension is derived from the browser's suggested filename
         (NotebookLM commonly hands back an ``.m4a`` container) rather than the
@@ -2572,6 +2772,15 @@ class NotebookLMAutomator:
                 return None
 
             self.logger.info(f"⬇️ Downloading audio to: {output_path}")
+
+            card = await self._find_artifact_card(
+                'Audio Overview', title=(artifact or {}).get('title'))
+            if card is not None:
+                saved_path, reason = await self._download_card_via_menu(card, output_path)
+                if saved_path:
+                    self.logger.info(f"✅ Audio download completed → {saved_path}")
+                    return saved_path
+                self.logger.warning(f"⚠️ Card menu download failed ({reason}); trying player controls")
 
             selector, download_target = await self._prepare_download_target()
             if not download_target:
@@ -2676,12 +2885,11 @@ class NotebookLMAutomator:
         """
         Download every downloadable artifact in the Studio panel.
 
-        The end-of-run export: each playable artifact card is opened and its
-        real download anchor captured (the visible "Save to note" style
-        button is a decoy — the file lives behind the player/overflow menu).
-        Files land in output_dir next to a manifest.json recording title,
-        path, sha256, and byte size — the shape cross-device sync tooling
-        needs to ship artifacts to other nodes.
+        The end-of-run export: every card is offered its own More > Download
+        menu item, and the cards whose menu has none (Mind Map) are skipped
+        with that reason. Files land in output_dir next to a manifest.json
+        recording title, path, sha256, and byte size — the shape cross-device
+        sync tooling needs to ship artifacts to other nodes.
 
         Args:
             output_dir: Directory for downloaded files + manifest.json
@@ -2698,7 +2906,8 @@ class NotebookLMAutomator:
             'notebook_id': notebook_id,
             'created_at': datetime.now().isoformat(),
             'downloads': [],
-            'skipped': [],
+            'skipped': [],   # the card offers no Download
+            'failed': [],    # a download was attempted and did not land
         }
 
         if notebook_id:
@@ -2712,99 +2921,59 @@ class NotebookLMAutomator:
 
         for index, artifact in enumerate(artifacts):
             title = artifact.get('title') or f'artifact-{index + 1}'
-
-            # Gate on the registry's authoritative `downloadable` flag, mapped
-            # from the card's family label, rather than the runtime Play button
-            # alone — two sources of truth otherwise disagree (e.g. a video
-            # card is playable+downloadable but has no audio download mechanic).
-            family_label = artifact.get('family_label')
-            spec = get_artifact_spec(family_label) if family_label else None
-            type_key = normalize_artifact_type(family_label) if family_label else None
-
-            if spec is not None:
-                if not spec.get('downloadable'):
-                    self.logger.info(f"⏭️ Skipping non-downloadable artifact: {title}")
-                    manifest['skipped'].append(
-                        {'title': title, 'reason': f'{family_label}: not downloadable per registry'}
-                    )
-                    continue
-                # Downloadable per registry but only Audio Overview has a working
-                # download path today; anything else (video_overview, ...) would
-                # be forced through the audio-player anchor hunt and fail — skip
-                # with a precise, honest reason instead of a bogus attempt.
-                if type_key and type_key != 'audio_overview':
-                    self.logger.info(
-                        f"⏭️ Skipping {family_label}: downloadable but no non-audio download path yet"
-                    )
-                    manifest['skipped'].append({
-                        'title': title,
-                        'reason': (
-                            f'{family_label}: downloadable but only audio download mechanics exist '
-                            f'(no {type_key} download path yet)'
-                        ),
-                    })
-                    continue
-            elif not artifact.get('playable'):
-                # Unknown family with no Play control — nothing to download.
-                self.logger.info(f"⏭️ Skipping non-downloadable artifact: {title}")
-                manifest['skipped'].append({'title': title, 'reason': 'not playable/downloadable'})
-                continue
+            family_label = artifact.get('family_label') or 'Artifact'
 
             safe_title = ''.join(
                 ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in title.strip()
             ).strip('-') or f'artifact-{index + 1}'
             timestamp = datetime.now().strftime('%Y%m%dT%H%M%S')
-            # Caller's requested stem/extension; download_audio swaps the
-            # extension when the browser's suggested filename disagrees.
-            output_path = os.path.join(output_dir, f'{safe_title}-{timestamp}.mp3')
+            # No extension: _capture_download appends the one the browser's
+            # suggested filename carries (.m4a, .mp4, .png, ...).
+            output_path = os.path.join(output_dir, f'{safe_title}-{timestamp}')
 
             try:
                 # Re-locate the SAME card by its stable DOM index, never by this
                 # loop's ordinal (which counts a visibility-filtered list while
                 # the DOM list is unfiltered — the wrong-artifact bug).
                 dom_index = artifact.get('dom_index')
-                cards = await self.page.query_selector_all('artifact-library-item')
+                cards = await self.page.query_selector_all(ARTIFACT_CARD_SELECTOR)
                 if dom_index is None or dom_index >= len(cards):
-                    manifest['skipped'].append({'title': title, 'reason': 'card disappeared'})
+                    manifest['failed'].append({'title': title, 'reason': 'card disappeared'})
                     continue
-                card = cards[dom_index]
-                play_button = await card.query_selector('button[aria-label="Play"]')
-                if play_button:
-                    await play_button.click()
-                    await self.page.wait_for_timeout(1500)
 
-                saved_path = await self.download_audio(output_path)
-                if saved_path:
-                    entry = {
-                        'title': title,
-                        'family_label': artifact.get('family_label'),
-                        'artifact_id': artifact.get('artifact_id'),
-                        'path': saved_path,
-                        'size': os.path.getsize(saved_path),
-                        'sha256': self._sha256_file(saved_path),
-                        'downloaded_at': datetime.now().isoformat(),
-                    }
-                    media_info = self._probe_media(saved_path)
-                    if media_info:
-                        entry['media'] = media_info
-                    manifest['downloads'].append(entry)
-                    self.logger.info(f"✅ Downloaded: {title} → {saved_path}")
+                # The card's own menu decides: a family is downloadable exactly
+                # when its menu offers Download (Mind Map, for one, does not).
+                saved_path, reason = await self._download_card_via_menu(cards[dom_index], output_path)
+                if not saved_path:
+                    bucket = 'skipped' if reason in self._NOT_DOWNLOADABLE_REASONS else 'failed'
+                    self.logger.info(f"⏭️ {title}: {reason}")
+                    manifest[bucket].append({'title': title, 'reason': f'{family_label}: {reason}'})
+                    continue
 
-                    if notebook_id and self.session_tracker:
-                        try:
-                            self.session_tracker.record_artifact_download(
-                                notebook_id, artifact.get('artifact_id'), entry
-                            )
-                        except Exception as e:
-                            self.logger.warning(f"⚠️ Could not record download in session: {e}")
-                else:
-                    manifest['skipped'].append({'title': title, 'reason': 'download failed'})
+                entry = {
+                    'title': title,
+                    'family_label': artifact.get('family_label'),
+                    'artifact_id': artifact.get('artifact_id'),
+                    'path': saved_path,
+                    'size': os.path.getsize(saved_path),
+                    'sha256': self._sha256_file(saved_path),
+                    'downloaded_at': datetime.now().isoformat(),
+                }
+                media_info = self._probe_media(saved_path)
+                if media_info:
+                    entry['media'] = media_info
+                manifest['downloads'].append(entry)
+                self.logger.info(f"✅ Downloaded: {title} → {saved_path}")
 
-                # Close any player/menu overlay before the next card.
-                await self.page.keyboard.press('Escape')
-                await self.page.wait_for_timeout(500)
+                if notebook_id and self.session_tracker:
+                    try:
+                        self.session_tracker.record_artifact_download(
+                            notebook_id, artifact.get('artifact_id'), entry
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"⚠️ Could not record download in session: {e}")
             except Exception as e:
-                manifest['skipped'].append({'title': title, 'reason': repr(e)})
+                manifest['failed'].append({'title': title, 'reason': repr(e)})
                 self.logger.warning(f"⚠️ Download failed for {title}: {e}")
 
         manifest_path = os.path.join(output_dir, 'manifest.json')

@@ -7,8 +7,10 @@ Covers:
      never by its ordinal in the visibility-filtered list (wrong-artifact bug).
   4. download_audio must derive the saved extension from the browser's
      suggested filename instead of the hardcoded .mp3.
-  5. download_all_artifacts must gate on the registry `downloadable` flag and
-     skip downloadable-but-non-audio families (video) with an honest reason.
+  5. download_all_artifacts must let each card's own More menu decide: cards
+     whose menu offers Download (audio, video, infographic) are downloaded,
+     cards without one are skipped as not downloadable, and an attempted
+     download that does not land is recorded as failed.
   3. _monitor_artifact_generation must return the NEW card's metadata on a
      repeat generation, resolved by set-difference against a baseline.
 
@@ -76,56 +78,58 @@ def _make_page(cards):
     return page
 
 
-# ── Finding 1 + 5: alignment by DOM index, registry-gated ────────
+# ── Finding 1 + 5: alignment by DOM index, card menu decides ─────
 
 def test_download_all_aligns_by_dom_index_when_hidden_card_precedes(tmp_path):
     """
     A hidden Audio card sits at DOM index 0; visible cards follow. The filtered
     list drops it, so ordinal indices diverge from DOM indices. Downloads must
-    click the RIGHT card's Play (by DOM index) and never the hidden/decoy ones,
-    while non-downloadable (slide) and non-audio-downloadable (video) families
-    are skipped with precise reasons.
+    act on the RIGHT card (by DOM index) and never the hidden decoy, the card
+    whose menu has no Download is skipped, and a failed attempt is recorded
+    as failed rather than silently skipped.
     """
     ghost = FakeCard('Ghost', 'Audio Overview', visible=False, playable=True)   # dom 0 (filtered)
     alpha = FakeCard('Alpha', 'Audio Overview', visible=True, playable=True)    # dom 1
-    beta = FakeCard('Beta Deck', 'Slide Deck', visible=True, playable=False)    # dom 2
+    beta = FakeCard('Beta Map', 'Mind Map', visible=True, playable=False)       # dom 2
     gamma = FakeCard('Gamma Vid', 'Video Overview', visible=True, playable=True)  # dom 3
     delta = FakeCard('Delta', 'Audio Overview', visible=True, playable=True)    # dom 4
-    cards = [ghost, alpha, beta, gamma, delta]
+    omega = FakeCard('Omega', 'Infographic', visible=True, playable=False)      # dom 5
+    cards = [ghost, alpha, beta, gamma, delta, omega]
 
     automator = NotebookLMAutomator()
     automator.page = _make_page(cards)
 
-    downloaded_paths = []
+    touched = []
 
-    async def fake_download_audio(path):
-        Path(path).write_bytes(b'audio-bytes')
-        downloaded_paths.append(path)
-        return path
+    async def fake_card_download(card, output_path, timeout=None):
+        touched.append(card)
+        if card is beta:
+            return None, 'no Download item in card menu'
+        if card is omega:
+            return None, 'download did not start'
+        ext = '.mp4' if card is gamma else '.m4a'
+        Path(output_path + ext).write_bytes(b'media-bytes')
+        return output_path + ext, None
 
-    automator.download_audio = fake_download_audio
+    automator._download_card_via_menu = fake_card_download
 
     manifest = asyncio.run(automator.download_all_artifacts(str(tmp_path)))
 
-    # Only the two visible Audio Overview cards are downloaded, in order.
     titles = [d['title'] for d in manifest['downloads']]
-    assert titles == ['Alpha', 'Delta']
+    assert titles == ['Alpha', 'Gamma Vid', 'Delta']
 
-    # The RIGHT cards' Play was clicked — identity, not ordinal position.
-    alpha.play.click.assert_awaited_once()
-    delta.play.click.assert_awaited_once()
-    # The hidden decoy (ordinal-0 collision) and skipped families are untouched.
-    ghost.play.click.assert_not_called()
-    gamma.play.click.assert_not_called()
+    # Identity, not ordinal position: the hidden decoy is never touched.
+    assert touched == [alpha, beta, gamma, delta, omega]
+    assert ghost not in touched
 
-    # Registry gating produced honest skip reasons.
     skipped = {s['title']: s['reason'] for s in manifest['skipped']}
-    assert 'Beta Deck' in skipped and 'not downloadable' in skipped['Beta Deck'].lower()
-    assert 'Gamma Vid' in skipped and 'download path' in skipped['Gamma Vid'].lower()
+    assert skipped == {'Beta Map': 'Mind Map: no Download item in card menu'}
+    failed = {f['title']: f['reason'] for f in manifest['failed']}
+    assert failed == {'Omega': 'Infographic: download did not start'}
 
     # Manifest file titles line up with the files actually written.
     written = json.loads((tmp_path / 'manifest.json').read_text())
-    assert [d['title'] for d in written['downloads']] == ['Alpha', 'Delta']
+    assert [d['title'] for d in written['downloads']] == ['Alpha', 'Gamma Vid', 'Delta']
     for entry in written['downloads']:
         assert Path(entry['path']).exists()
 

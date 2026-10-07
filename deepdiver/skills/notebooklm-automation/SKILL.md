@@ -47,6 +47,7 @@ deepdiver studio audio --format deep_dive --language French --length long \
 deepdiver studio slide-deck --format presenter --focus "..." -n <id>
 deepdiver studio generate <type> -n <id>        # any Studio family
 deepdiver studio list -n <id>                   # artifact cards currently visible
+deepdiver studio download -n <id> -o <dir>      # every downloadable card + manifest.json
 deepdiver session status                        # session truth
 deepdiver skills list                           # skills bundled in this package
 ```
@@ -90,6 +91,20 @@ Artifact types for `studio generate`: `audio_overview`, `slide_deck`,
   authenticated notebook URL + artifact title instead.
 - **Session dir is relative** (`./sessions`) — run from the repo root, or
   point `SESSION_TRACKING.session_dir` at an absolute path.
+- **Download lives in each card's More menu.** Audio (.m4a), video (.mp4)
+  and infographic (.png) cards offer More > Download; Mind Map does not.
+  That item starts the download outside any page frame Playwright tracks,
+  so `page.expect_download()` never fires. DeepDiver captures it with
+  browser-level CDP events (`Browser.setDownloadBehavior` +
+  `downloadWillBegin`/`downloadProgress`). `studio download` exits 1 when a
+  card that offered Download did not land.
+- **Mind Map cards say only "Artifact".** Their `aria-description` is
+  generic; the `.artifact-icon` symbol (`flowchart`) names the family.
+- **Host moved.** `notebooklm.google.com` redirects to
+  `notebook.google.com`; both are the same app.
+- **Cloned profile, no CDP.** A cloned or fresh user-data-dir opens Chrome's
+  Terms of Service window and the DevTools server never starts unless
+  Chrome gets `--no-first-run` (`deepdiver chrome launch` passes it).
 - **Video Overview fallback.** If a requested family fails in the current
   UI, Audio Overview is the practical fallback; record the substitution in
   your status reporting.

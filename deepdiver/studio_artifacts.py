@@ -21,11 +21,16 @@ from typing import Any, Dict, List, Optional
 # family; a Play button plus a More/menu button is the strong completion
 # signal for playable artifacts, while non-playable ones still expose the
 # title + More controls.
+#
+# 'icon' is the Material Symbols name shared by the Studio tile and the card's
+# .artifact-icon. Some cards (Mind Map, observed 2026-10-06) carry only the
+# generic aria-description "Artifact", so the icon is the fallback family key.
 ARTIFACT_CARD_SELECTOR = 'artifact-library-item'
 
 ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     'audio_overview': {
         'label': 'Audio Overview',
+        'icon': 'audio_spark',
         'formats': {
             'deep_dive': 'Deep Dive',
             'brief': 'Brief',
@@ -40,6 +45,7 @@ ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     },
     'slide_deck': {
         'label': 'Slide Deck',
+        'icon': 'tablet',
         'formats': {
             'detailed': 'Detailed Deck',
             'detailed_deck': 'Detailed Deck',
@@ -54,6 +60,7 @@ ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     },
     'video_overview': {
         'label': 'Video Overview',
+        'icon': 'videocam',
         'formats': {
             'explainer': 'Explainer',
             'brief': 'Brief',
@@ -66,6 +73,7 @@ ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     },
     'mind_map': {
         'label': 'Mind Map',
+        'icon': 'flowchart',
         'formats': None,
         'supports_language': False,
         'supports_length': False,
@@ -75,6 +83,7 @@ ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     },
     'reports': {
         'label': 'Reports',
+        'icon': 'auto_tab_group',
         'formats': None,
         'supports_language': True,
         'supports_length': False,
@@ -84,6 +93,7 @@ ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     },
     'flashcards': {
         'label': 'Flashcards',
+        'icon': 'copy',
         'formats': None,
         'supports_language': True,
         'supports_length': False,
@@ -93,6 +103,7 @@ ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     },
     'quiz': {
         'label': 'Quiz',
+        'icon': 'quiz',
         'formats': None,
         'supports_language': True,
         'supports_length': False,
@@ -102,15 +113,17 @@ ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     },
     'infographic': {
         'label': 'Infographic',
+        'icon': 'stacked_bar_chart',
         'formats': None,
         'supports_language': True,
         'supports_length': False,
         'supports_focus_prompt': True,
-        'downloadable': False,
+        'downloadable': True,
         'playable': False,
     },
     'data_table': {
         'label': 'Data Table',
+        'icon': 'format_list_bulleted',
         'formats': None,
         'supports_language': False,
         'supports_length': False,
@@ -139,6 +152,17 @@ def normalize_artifact_type(value: str) -> Optional[str]:
     for type_key, spec in ARTIFACT_TYPES.items():
         if spec['label'].lower() == value.strip().lower():
             return type_key
+    return None
+
+
+def family_label_from_icon(icon: Optional[str]) -> Optional[str]:
+    """Resolve a card's .artifact-icon symbol name to its family label."""
+    if not icon:
+        return None
+    icon = icon.strip()
+    for spec in ARTIFACT_TYPES.values():
+        if spec.get('icon') == icon:
+            return spec['label']
     return None
 
 

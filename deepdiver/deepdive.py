@@ -33,6 +33,7 @@ from .notebooklm_automator import (
 )
 from .studio_artifacts import (
     ARTIFACT_TYPES,
+    get_artifact_spec,
     list_artifact_type_keys,
     normalize_artifact_type,
 )
@@ -1110,7 +1111,7 @@ def studio_audio(format: Optional[str], language: str, length: Optional[str],
                         output_path = os.path.join(artifact_dir, f'audio-overview-{stamp}.mp3')
 
                     console.print(f"⬇️ Downloading audio to: {output_path}", style="blue")
-                    saved_path = await automator.download_audio(output_path)
+                    saved_path = await automator.download_audio(output_path, artifact=artifact_data)
                     if saved_path:
                         size = os.path.getsize(saved_path)
                         console.print(f"✅ Downloaded ({size} bytes): {saved_path}", style="green")
@@ -1286,8 +1287,13 @@ def studio_list(notebook_id: Optional[str], cdp_url: str, config: str):
             for artifact in artifacts:
                 family = artifact.get('family_label') or 'Unknown family'
                 title = artifact.get('title') or 'Untitled'
-                playable = '▶️ downloadable' if artifact.get('playable') else '—'
-                console.print(f"  • [{family}] {title} {playable}", style="cyan")
+                spec = get_artifact_spec(family)
+                marks = []
+                if artifact.get('playable'):
+                    marks.append('▶️ playable')
+                if spec and spec.get('downloadable'):
+                    marks.append('⬇️ downloadable')
+                console.print(f"  • [{family}] {title} {' · '.join(marks) or '—'}", style="cyan")
                 if artifact.get('details'):
                     console.print(f"      {artifact['details']}", style="dim")
             console.print("🔗 Browser kept open for next command", style="dim")
@@ -1329,7 +1335,7 @@ def studio_download(notebook_id: Optional[str], output: Optional[str],
         try:
             if not await automator.connect_to_browser():
                 console.print("❌ Failed to connect to browser", style="red")
-                return
+                return False
 
             output_dir = output
             if not output_dir:
@@ -1342,23 +1348,30 @@ def studio_download(notebook_id: Optional[str], output: Optional[str],
 
             if manifest.get('error'):
                 console.print(f"❌ {manifest['error']}", style="red")
-                return
+                return False
 
             console.print(f"✅ Downloaded {len(manifest['downloads'])} artifact(s)", style="green")
             for entry in manifest['downloads']:
                 size_mb = entry['size'] / (1024 * 1024)
                 console.print(f"  • {entry['title']} → {entry['path']} ({size_mb:.1f} MB)", style="cyan")
             if manifest['skipped']:
-                console.print(f"⏭️ Skipped {len(manifest['skipped'])}:", style="yellow")
+                console.print(f"⏭️ Not downloadable {len(manifest['skipped'])}:", style="yellow")
                 for item in manifest['skipped']:
                     console.print(f"  • {item['title']}: {item['reason']}", style="dim")
+            if manifest.get('failed'):
+                console.print(f"❌ Failed {len(manifest['failed'])}:", style="red")
+                for item in manifest['failed']:
+                    console.print(f"  • {item['title']}: {item['reason']}", style="red")
             if manifest.get('manifest_path'):
                 console.print(f"🗂️ Manifest: {manifest['manifest_path']}", style="bold blue")
             console.print("🔗 Browser kept open for next command", style="dim")
+            return not manifest.get('failed')
         except Exception as e:
             console.print(f"❌ Error: {e}", style="red")
+            return False
 
-    asyncio.run(run_download())
+    if not asyncio.run(run_download()):
+        sys.exit(1)
 
 
 # ═══════════════════════════════════════════════════════════════
