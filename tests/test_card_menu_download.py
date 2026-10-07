@@ -242,3 +242,53 @@ def test_report_card_family_is_the_canonical_label():
     automator = NotebookLMAutomator()
     card = _IconCard('Executive Briefing', 'Report', 'auto_tab_group')
     assert asyncio.run(automator._card_family_label(card)) == 'Reports'
+
+
+# ── Report save reads the artifact viewer, never the chat ────────
+
+class _FakeViewer:
+    def __init__(self, markdown, html):
+        self._markdown, self._html = markdown, html
+        self.first = self
+
+    async def wait_for(self, state=None, timeout=None):
+        return None
+
+    async def evaluate(self, script):
+        return self._markdown
+
+    async def inner_html(self):
+        return self._html
+
+
+def test_save_report_card_reads_the_artifact_viewer_not_a_chat_answer(tmp_path):
+    """Chat answers render in the same doc-viewer element as reports and come
+    first in the DOM; the saved report must be the one in the artifact viewer."""
+    chat = _FakeViewer('In the sources, Guillaume corrects agents aloud ...\n', '<div>Thoughts</div>')
+    report = _FakeViewer('# Mastering the Miadi Screenwalk\n\n## Introduction\n', '<div>report</div>')
+    page = MagicMock()
+    page.locator = MagicMock(side_effect=lambda sel: report if sel.startswith('artifact-viewer ') else chat)
+
+    automator = NotebookLMAutomator()
+    automator.page = page
+    automator.open_artifact_card = AsyncMock(return_value=True)
+    automator.close_artifact_viewer = AsyncMock()
+
+    saved, reason = asyncio.run(automator.save_report_card(
+        MagicMock(), str(tmp_path / 'report'), title='Mastering the Miadi Screenwalk'))
+
+    assert reason is None
+    text = Path(saved['path']).read_text()
+    assert text.startswith('# Mastering the Miadi Screenwalk')
+    assert 'corrects agents aloud' not in text
+    assert 'Thoughts' not in Path(saved['html_path']).read_text()
+    automator.close_artifact_viewer.assert_awaited_once()
+
+
+def test_signin_redirect_is_not_a_notebook():
+    from deepdiver.notebooklm_automator import _is_google_signin_url
+    signin = ('https://accounts.google.com/v3/signin/identifier?continue='
+              'https://notebook.google.com/login?continue%3Dhttps://notebook.google.com/notebook/0ae51b4c')
+    assert _is_google_signin_url(signin)
+    assert not _is_notebook_url(signin)
+    assert _is_notebook_url('https://notebook.google.com/notebook/0ae51b4c-8ed2-4ee2-a641-2c7e88b7e2ea')

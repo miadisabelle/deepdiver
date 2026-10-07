@@ -107,7 +107,12 @@ Artifact types for `studio generate`: `audio_overview`, `slide_deck`,
   sources). The template's pencil, "Customize Report", opens a language
   select and a prompt; an Interactive prompt can name which studio items
   to embed. Cards say "Report"; they have no Download, so `studio download`
-  reads the viewer (`labs-tailwind-doc-viewer`) into Markdown and HTML.
+  reads the viewer into Markdown and HTML: the `labs-tailwind-doc-viewer`
+  inside `artifact-viewer`. Chat answers use the same element and come first
+  in the DOM, so never read it unscoped.
+- **Signed out.** A profile that is not signed in lands on
+  accounts.google.com with the notebook URL in `continue=`; DeepDiver
+  reports "Not signed in" and exits 1. Signing in is the person's act.
 - **Generating cards look finished.** A card still generating already
   shows its family and a "Generating …" title; its main button is
   disabled (`.mat-mdc-button-disabled`). Card identity is the UUID in its

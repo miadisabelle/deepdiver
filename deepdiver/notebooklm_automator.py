@@ -73,7 +73,16 @@ def _is_notebooklm_host(url: Optional[str]) -> bool:
 
 
 def _is_notebook_url(url: Optional[str]) -> bool:
-    return _is_notebooklm_host(url) and '/notebook/' in (url or '')
+    from urllib.parse import urlparse
+    return _is_notebooklm_host(url) and urlparse(url or '').path.startswith('/notebook/')
+
+
+def _is_google_signin_url(url: Optional[str]) -> bool:
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url or '').hostname == 'accounts.google.com'
+    except Exception:
+        return False
 
 
 # The button that opens the add-source dialog. Never a bare
@@ -3563,7 +3572,14 @@ class NotebookLMAutomator:
             # Verify notebook loaded successfully
             # First check if URL contains /notebook/ - most reliable indicator
             current_url = self.page.url
-            if '/notebook/' in current_url:
+            # A signed-out profile lands on accounts.google.com with the
+            # notebook URL in its continue= parameter; a substring test on
+            # '/notebook/' accepted that page (2026-10-07).
+            if _is_google_signin_url(current_url):
+                self.logger.error("❌ Not signed in to Google in this Chrome profile: "
+                                  "sign in at the Chrome window, then retry")
+                return False
+            if _is_notebook_url(current_url):
                 self.logger.info(f"✅ Notebook URL verified: {current_url}")
                 self.logger.info(f"✅ Successfully navigated to notebook")
                 return True

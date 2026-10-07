@@ -13,7 +13,11 @@ button.citation-marker. This module turns that DOM into Markdown.
 Assembly Team: Jerry ⚡, Nyro ♠️, Aureon 🌿, JamAI 🎸, Synth 🧵
 """
 
-REPORT_VIEWER_SELECTOR = 'labs-tailwind-doc-viewer'
+# Scoped to the Studio's artifact viewer: every chat answer is also a
+# <labs-tailwind-doc-viewer>, and the chat panel comes first in the DOM, so an
+# unscoped selector saved the notebook's first chat answer as the report
+# (Episode 550, notebook 0ae51b4c, found by the T6 lead on 2026-10-07).
+REPORT_VIEWER_SELECTOR = 'artifact-viewer labs-tailwind-doc-viewer'
 
 # Evaluated in the page with the doc viewer element as its argument.
 REPORT_TO_MARKDOWN_JS = r"""
