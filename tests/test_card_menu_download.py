@@ -206,3 +206,39 @@ def test_card_without_download_item_is_reported_and_menu_closed():
     card.query_selector.assert_awaited_once_with('button[aria-label="More"]')
     more.click.assert_awaited_once()
     page.keyboard.press.assert_awaited_once_with('Escape')
+
+
+# ── Completion detection ─────────────────────────────────────────
+
+def test_completion_selectors_never_match_a_generating_card():
+    from deepdiver.studio_artifacts import GENERATING_CARD_MARKER, completed_card_selectors
+    for selector in completed_card_selectors('Infographic'):
+        if selector.startswith('artifact-library-item'):
+            assert f':not(:has({GENERATING_CARD_MARKER}))' in selector, selector
+
+
+def test_mind_map_completion_is_matched_by_its_icon():
+    from deepdiver.studio_artifacts import completed_card_selectors
+    selectors = completed_card_selectors('Mind Map')
+    assert any('.artifact-icon:text-is("flowchart")' in s for s in selectors)
+
+
+# ── Reports ──────────────────────────────────────────────────────
+
+def test_report_card_label_and_templates_resolve():
+    from deepdiver.studio_artifacts import (
+        normalize_artifact_format, normalize_artifact_type, normalize_report_template,
+    )
+    assert normalize_artifact_type('Report') == 'reports'
+    assert normalize_artifact_format('reports', 'interactive') == 'Interactive'
+    assert normalize_artifact_format('reports', 'document') == 'Document'
+    assert normalize_report_template('briefing-doc') == 'Briefing Doc'
+    assert normalize_report_template('learning_overview') == 'Learning Overview'
+    # Suggested templates are written from the sources and pass through.
+    assert normalize_report_template('Architecture Specification') == 'Architecture Specification'
+
+
+def test_report_card_family_is_the_canonical_label():
+    automator = NotebookLMAutomator()
+    card = _IconCard('Executive Briefing', 'Report', 'auto_tab_group')
+    assert asyncio.run(automator._card_family_label(card)) == 'Reports'

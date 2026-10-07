@@ -47,7 +47,10 @@ deepdiver studio audio --format deep_dive --language French --length long \
 deepdiver studio slide-deck --format presenter --focus "..." -n <id>
 deepdiver studio generate <type> -n <id>        # any Studio family
 deepdiver studio list -n <id>                   # artifact cards currently visible
-deepdiver studio download -n <id> -o <dir>      # every downloadable card + manifest.json
+deepdiver studio download -n <id> -o <dir>      # every downloadable card + reports as .md/.html + manifest.json
+deepdiver studio report --prompt "..." -n <id>  # Interactive report (embeds studio items); --format document --template "Briefing Doc"
+deepdiver studio open --family reports -n <id>  # show an artifact on screen; --play for audio/video
+deepdiver notebook ask <id> "question" -o asked.md   # answer as Markdown with [n] citations
 deepdiver session status                        # session truth
 deepdiver skills list                           # skills bundled in this package
 ```
@@ -98,6 +101,18 @@ Artifact types for `studio generate`: `audio_overview`, `slide_deck`,
   browser-level CDP events (`Browser.setDownloadBehavior` +
   `downloadWillBegin`/`downloadProgress`). `studio download` exits 1 when a
   card that offered Download did not land.
+- **Reports.** The tile opens "Create report": format Interactive (default,
+  template Learning Overview) or Document (Create Your Own, Briefing Doc,
+  Study Guide, Blog Post, plus suggested templates written from the
+  sources). The template's pencil, "Customize Report", opens a language
+  select and a prompt; an Interactive prompt can name which studio items
+  to embed. Cards say "Report"; they have no Download, so `studio download`
+  reads the viewer (`labs-tailwind-doc-viewer`) into Markdown and HTML.
+- **Generating cards look finished.** A card still generating already
+  shows its family and a "Generating …" title; its main button is
+  disabled (`.mat-mdc-button-disabled`). Card identity is the UUID in its
+  inner `id="artifact-labels-<uuid>"`, never the details line, which
+  carries a relative time.
 - **Mind Map cards say only "Artifact".** Their `aria-description` is
   generic; the `.artifact-icon` symbol (`flowchart`) names the family.
 - **Host moved.** `notebooklm.google.com` redirects to

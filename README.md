@@ -274,6 +274,24 @@ deepdiver studio generate video_overview --language French -n abc-123
 
 # See what's ready in the Studio panel
 deepdiver studio list -n abc-123
+
+# Reports: Interactive (embeds the notebook's studio items) or Document
+deepdiver studio report --prompt "Include only the infographic. Walk a viewer through the pipeline" -n abc-123
+deepdiver studio report --format document --template "Briefing Doc" -n abc-123
+
+# Show an artifact on screen (for a screenwalk); --play starts audio/video
+deepdiver studio open --family reports -n abc-123
+deepdiver studio open --family video_overview --play -n abc-123
+```
+
+Reports have no file download in Gemini Notebook; `studio download` saves
+each one from its viewer as Markdown and HTML.
+
+### Asking a Notebook
+
+```bash
+# The answer prints as Markdown with the notebook's citations as [n]
+deepdiver notebook ask abc-123 "Which corrections did the person speak aloud?" -o asked.md
 ```
 
 Artifact types: `audio_overview`, `slide_deck`, `video_overview`,
@@ -525,6 +543,7 @@ This project follows the G.Music Assembly framework:
 - **[CONFIGURATION.md](CONFIGURATION.md)** - Configuration file discovery and setup guide
 - **[ROADMAP.md](ROADMAP.md)** - Project development roadmap and milestones
 - **[CLAUDE.md](CLAUDE.md)** - Assembly team configuration and workflow
+- **[Miadi Factory](docs/MIADI_FACTORY.md)** - What this fork supplies to the Miadi Factory (T6 Production), the review-to-notebook pipeline, install requirements, open decisions
 
 ### Implementation Guides
 - **[NotebookLM Studio Artifacts](docs/NOTEBOOKLM_STUDIO_ARTIFACTS.md)** - Complete implementation guide for all Studio artifact types:

@@ -27,6 +27,13 @@ from typing import Any, Dict, List, Optional
 # generic aria-description "Artifact", so the icon is the fallback family key.
 ARTIFACT_CARD_SELECTOR = 'artifact-library-item'
 
+# A card still generating already carries the family label and a title
+# ("Generating Infographic... based on 2 sources"); what it lacks is an
+# enabled main button and a More menu. Its main button is disabled
+# (observed 2026-10-06), so every completion selector excludes that.
+GENERATING_CARD_MARKER = '.mat-mdc-button-disabled'
+READY_CARD_SELECTOR = f'{ARTIFACT_CARD_SELECTOR}:not(:has({GENERATING_CARD_MARKER}))'
+
 ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     'audio_overview': {
         'label': 'Audio Overview',
@@ -84,10 +91,28 @@ ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     'reports': {
         'label': 'Reports',
         'icon': 'auto_tab_group',
-        'formats': None,
+        # Cards say "Report"; the dialog is titled "Create report".
+        'card_label': 'Report',
+        'dialog_title': 'Create report',
+        'formats': {
+            'interactive': 'Interactive',
+            'document': 'Document',
+        },
+        # Fixed templates (observed 2026-10-06). Document also lists
+        # "Suggested Template" cards written from the sources; any of
+        # those can be named by its visible title.
+        'templates': {
+            'learning_overview': 'Learning Overview',
+            'create_your_own': 'Create Your Own',
+            'briefing_doc': 'Briefing Doc',
+            'study_guide': 'Study Guide',
+            'blog_post': 'Blog Post',
+        },
         'supports_language': True,
         'supports_length': False,
         'supports_focus_prompt': True,
+        # Interactive reports have no Download or export; Document reports
+        # export to Docs/Sheets only.
         'downloadable': False,
         'playable': False,
     },
@@ -148,9 +173,9 @@ def normalize_artifact_type(value: str) -> Optional[str]:
     key = value.strip().lower().replace('-', '_').replace(' ', '_')
     if key in ARTIFACT_TYPES:
         return key
-    # Accept the display label as input too ("Slide Deck" -> slide_deck).
+    # Accept the display label, or the label a card shows ("Report"), too.
     for type_key, spec in ARTIFACT_TYPES.items():
-        if spec['label'].lower() == value.strip().lower():
+        if value.strip().lower() in (spec['label'].lower(), spec.get('card_label', '').lower()):
             return type_key
     return None
 
@@ -199,22 +224,43 @@ def completed_card_selectors(artifact_label: Optional[str] = None) -> List[str]:
     These are the durable completion cues observed after NotebookLM UI drift:
     legacy 'Load' buttons disappeared, and the current card exposes
     aria-description + Play/More controls inside <artifact-library-item>.
+    A card whose main button is disabled is still generating and never
+    matches.
     """
     selectors = []
     if artifact_label:
         selectors.extend([
-            f'{ARTIFACT_CARD_SELECTOR}:has([aria-description="{artifact_label}"]):has(button[aria-label="Play"])',
-            f'{ARTIFACT_CARD_SELECTOR}:has([aria-description="{artifact_label}"]):has(button[aria-label="More"])',
-            f'{ARTIFACT_CARD_SELECTOR}:has([aria-description="{artifact_label}"]):has(.artifact-title)',
+            f'{READY_CARD_SELECTOR}:has([aria-description="{artifact_label}"]):has(button[aria-label="Play"])',
+            f'{READY_CARD_SELECTOR}:has([aria-description="{artifact_label}"]):has(button[aria-label="More"])',
+            f'{READY_CARD_SELECTOR}:has([aria-description="{artifact_label}"]):has(.artifact-title)',
         ])
+        # Mind Map cards say only "Artifact"; their icon names the family.
+        # :text-is() is a Playwright pseudo-class, fine for query_selector.
+        spec = get_artifact_spec(artifact_label)
+        if spec and spec.get('icon'):
+            selectors.append(
+                f'{READY_CARD_SELECTOR}:has(.artifact-icon:text-is("{spec["icon"]}"))'
+                f':has(button[aria-label="More"])'
+            )
     selectors.extend([
-        f'{ARTIFACT_CARD_SELECTOR}:has(.artifact-title):has(button[aria-label="Play"]):has(button[aria-label="More"])',
-        f'{ARTIFACT_CARD_SELECTOR}:has(.artifact-more-button):has(button[aria-label="Play"])',
+        f'{READY_CARD_SELECTOR}:has(.artifact-title):has(button[aria-label="Play"]):has(button[aria-label="More"])',
+        f'{READY_CARD_SELECTOR}:has(.artifact-more-button):has(button[aria-label="Play"])',
         # Legacy pre-drift cues kept as last resorts.
         '.studio-artifact:has(button:has-text("Load"))',
         '.artifact-card:has(button:has-text("Load"))',
     ])
     return selectors
+
+
+def normalize_report_template(value: Optional[str]) -> Optional[str]:
+    """Resolve a template key or title; unknown titles pass through as given."""
+    if not value:
+        return None
+    templates = ARTIFACT_TYPES['reports']['templates']
+    key = value.strip().lower().replace('-', '_').replace(' ', '_')
+    if key in templates:
+        return templates[key]
+    return value.strip()
 
 
 def list_artifact_type_keys() -> List[str]:

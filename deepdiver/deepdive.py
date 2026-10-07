@@ -901,6 +901,47 @@ def notebook_add_source(notebook_id: str, source: str, name: Optional[str], conf
     asyncio.run(run_add_source())
 
 
+@notebook.command(name='ask')
+@click.argument('notebook_id')
+@click.argument('question')
+@click.option('--output', '-o', help='Append the question and answer to this Markdown file')
+@cdp_url_option
+@click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
+              help='Path to configuration file')
+def notebook_ask(notebook_id: str, question: str, output: Optional[str], cdp_url: str, config: str):
+    """Ask a notebook's chat a question and print the answer as Markdown.
+
+    The answer keeps the notebook's citations as [n]. With --output, the
+    question and answer are appended to a Markdown file, so a set of
+    questions put to a notebook becomes one record.
+
+    Example:
+        deepdiver notebook ask abc-123 "Which corrections did the person speak aloud?" -o asked.md
+    """
+    from .notebooklm_automator import NotebookLMAutomator
+
+    async def run_ask():
+        automator = NotebookLMAutomator(config, cdp_url_override=cdp_url)
+        if not await automator.connect_to_browser():
+            console.print("❌ Failed to connect to browser", style="red")
+            return False
+        result = await automator.ask_notebook(question, notebook_id=notebook_id)
+        if not result:
+            console.print("❌ No answer", style="red")
+            return False
+        console.print(result['answer'])
+        if output:
+            os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+            with open(output, 'a', encoding='utf-8') as f:
+                f.write(f"## {question}\n\n_Asked {result['asked_at']} in notebook "
+                        f"{notebook_id}_\n\n{result['answer']}\n\n")
+            console.print(f"📝 Appended to {output}", style="dim")
+        return True
+
+    if not asyncio.run(run_ask()):
+        sys.exit(1)
+
+
 @notebook.command(name='resume')
 @click.argument('notebook_id')
 @click.option('--source', '-s', 'sources', multiple=True,
@@ -1142,8 +1183,13 @@ def studio_audio(format: Optional[str], language: str, length: Optional[str],
 
 def _run_studio_generation(artifact_type: str, format: Optional[str], language: Optional[str],
                            length: Optional[str], focus: Optional[str],
-                           notebook_id: Optional[str], cdp_url: Optional[str], config: str):
-    """Shared runner for non-audio Studio artifact generation commands."""
+                           notebook_id: Optional[str], cdp_url: Optional[str], config: str,
+                           template: Optional[str] = None):
+    """Shared runner for non-audio Studio artifact generation commands.
+
+    Exits 1 when nothing was generated, so agents running the binary can
+    trust the exit status.
+    """
     from .notebooklm_automator import NotebookLMAutomator
     from .session_tracker import SessionTracker
 
@@ -1157,7 +1203,7 @@ def _run_studio_generation(artifact_type: str, format: Optional[str], language: 
             if not await automator.connect_to_browser():
                 console.print("❌ Failed to connect to browser", style="red")
                 console.print("💡 Make sure Chrome is running with: deepdiver init", style="yellow")
-                return
+                return False
 
             artifact_data = await automator.generate_studio_artifact(
                 artifact_type,
@@ -1166,6 +1212,7 @@ def _run_studio_generation(artifact_type: str, format: Optional[str], language: 
                 length=length,
                 focus_prompt=focus,
                 notebook_id=notebook_id,
+                template=template,
             )
 
             if artifact_data:
@@ -1179,14 +1226,17 @@ def _run_studio_generation(artifact_type: str, format: Optional[str], language: 
                 console.print("💡 A ready artifact can still have a disabled 'Copy link' — that is a", style="dim")
                 console.print("   notebook-sharing gate, not a generation failure.", style="dim")
                 console.print("🔗 Browser kept open for next command", style="dim")
-            else:
-                console.print("❌ Artifact generation failed or timed out", style="red")
-                console.print("💡 Check 'deepdiver studio list' — the artifact may still exist", style="yellow")
+                return True
+            console.print("❌ Artifact generation failed or timed out", style="red")
+            console.print("💡 Check 'deepdiver studio list' — the artifact may still exist", style="yellow")
+            return False
 
         except Exception as e:
             console.print(f"❌ Error: {e}", style="red")
+            return False
 
-    asyncio.run(run_generation())
+    if not asyncio.run(run_generation()):
+        sys.exit(1)
 
 
 @studio.command(name='slide-deck')
@@ -1225,13 +1275,14 @@ def studio_slide_deck(format: Optional[str], language: Optional[str], length: Op
 @click.option('--language', '-l', default=None, help='Output language')
 @click.option('--length', help='Length option when supported')
 @click.option('--focus', help='Free-text prompt when supported')
+@click.option('--template', '-t', help='Reports only: template name (see `studio report --help`)')
 @click.option('--notebook-id', '-n', help='Notebook ID (uses current page if not provided)')
 @cdp_url_option
 @click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
               help='Path to configuration file')
 def studio_generate(artifact_type: str, format: Optional[str], language: Optional[str],
-                    length: Optional[str], focus: Optional[str], notebook_id: Optional[str],
-                    cdp_url: str, config: str):
+                    length: Optional[str], focus: Optional[str], template: Optional[str],
+                    notebook_id: Optional[str], cdp_url: str, config: str):
     """Generate any Studio artifact family by name.
 
     ARTIFACT_TYPE is one of: audio_overview, slide_deck, video_overview,
@@ -1250,7 +1301,101 @@ def studio_generate(artifact_type: str, format: Optional[str], language: Optiona
 
     console.print(f"🎨 Generating Studio artifact: {artifact_type}", style="blue")
     _run_studio_generation(artifact_type, format, language, length, focus,
-                           notebook_id, cdp_url, config)
+                           notebook_id, cdp_url, config, template=template)
+
+
+@studio.command(name='report')
+@click.option('--format', '-f', type=click.Choice(['interactive', 'document'], case_sensitive=False),
+              default='interactive', show_default=True,
+              help='interactive = report with embedded studio content; document = text only')
+@click.option('--template', '-t',
+              help='Learning Overview (interactive); Create Your Own, Briefing Doc, Study Guide, '
+                   'Blog Post, or a suggested template title (document)')
+@click.option('--prompt', '-p', 'prompt', help='Describe the report you want (Customize Report)')
+@click.option('--language', '-l', default=None, help='Report language')
+@click.option('--notebook-id', '-n', help='Notebook ID (uses current page if not provided)')
+@cdp_url_option
+@click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
+              help='Path to configuration file')
+def studio_report(format: str, template: Optional[str], prompt: Optional[str],
+                  language: Optional[str], notebook_id: Optional[str], cdp_url: str, config: str):
+    """Generate a Report through the "Create report" dialog.
+
+    Interactive reports embed the notebook's other studio items, which makes
+    them a page to walk through on screen. The prompt can say which items to
+    include ("include only the infographic and the audio overview") or which
+    source to follow.
+
+    Examples:
+        deepdiver studio report --prompt "Walk through the screenwalk's handoff to Mia" -n abc-123
+        deepdiver studio report --format document --template "Briefing Doc" -n abc-123
+        deepdiver studio report --format document --prompt "A one-page spec of the pipeline" -n abc-123
+    """
+    console.print(f"📑 Generating {format} report...", style="blue")
+    _run_studio_generation('reports', format, language, None, prompt,
+                           notebook_id, cdp_url, config, template=template)
+
+
+@studio.command(name='open')
+@click.option('--title', '-t', help='Open the card with this title (or a title starting with it)')
+@click.option('--family', '-f', help='Without --title: open the newest card of this family')
+@click.option('--play', is_flag=True, help='Audio/Video Overview: start playback instead of opening the viewer')
+@click.option('--notebook-id', '-n', help='Notebook ID (uses current page if not provided)')
+@cdp_url_option
+@click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
+              help='Path to configuration file')
+def studio_open(title: Optional[str], family: Optional[str], play: bool,
+                notebook_id: Optional[str], cdp_url: str, config: str):
+    """Open (or play) a Studio artifact on screen and leave it there.
+
+    For a screenwalk: an Interactive report opens full-screen with its table
+    of contents and embedded studio items; --play starts an Audio or Video
+    Overview so it can be paused and talked over.
+
+    Examples:
+        deepdiver studio open --family reports -n abc-123
+        deepdiver studio open --title "Screenwalk to Studio Media" -n abc-123
+        deepdiver studio open --family video_overview --play -n abc-123
+    """
+    from .notebooklm_automator import NotebookLMAutomator
+    from .studio_artifacts import ARTIFACT_CARD_SELECTOR
+
+    if not title and not family:
+        console.print("❌ Give --title or --family", style="red")
+        sys.exit(2)
+
+    async def run_open():
+        automator = NotebookLMAutomator(config, cdp_url_override=cdp_url)
+        if not await automator.connect_to_browser():
+            console.print("❌ Failed to connect to browser", style="red")
+            return False
+        if notebook_id and not await automator.navigate_to_notebook(notebook_id=notebook_id):
+            return False
+        card = None
+        if title:
+            for candidate in await automator.page.query_selector_all(ARTIFACT_CARD_SELECTOR):
+                title_el = await candidate.query_selector('.artifact-title')
+                text = (await title_el.inner_text()).strip() if title_el else ''
+                if text == title.strip() or text.startswith(title.strip()):
+                    card = candidate
+                    break
+        else:
+            spec = get_artifact_spec(family)
+            if not spec:
+                console.print(f"❌ Unknown family: {family}", style="red")
+                return False
+            card = await automator._find_artifact_card(spec['label'])
+        if not card:
+            console.print("❌ No matching artifact card", style="red")
+            return False
+        if not await automator.open_artifact_card(card, play=play):
+            console.print("❌ The card could not be opened", style="red")
+            return False
+        console.print("✅ Opened" + (" and playing" if play else ""), style="green")
+        return True
+
+    if not asyncio.run(run_open()):
+        sys.exit(1)
 
 
 @studio.command(name='list')

@@ -11,6 +11,7 @@ Assembly Team: Jerry ⚡, Nyro ♠️, Aureon 🌿, JamAI 🎸, Synth 🧵
 import asyncio
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -26,11 +27,13 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from .studio_artifacts import (
     ARTIFACT_CARD_SELECTOR,
     ARTIFACT_TYPES,
+    GENERATING_CARD_MARKER,
     completed_card_selectors,
     family_label_from_icon,
     get_artifact_spec,
     normalize_artifact_format,
     normalize_artifact_type,
+    normalize_report_template,
 )
 
 
@@ -71,6 +74,19 @@ def _is_notebooklm_host(url: Optional[str]) -> bool:
 
 def _is_notebook_url(url: Optional[str]) -> bool:
     return _is_notebooklm_host(url) and '/notebook/' in (url or '')
+
+
+# The button that opens the add-source dialog. Never a bare
+# button:has-text("Add"): the header's "Create notebook" button renders its
+# icon ligature as text ("add_2 Create notebook"), so that substring match
+# creates a new notebook instead (three empty notebooks, 2026-10-06).
+ADD_SOURCE_BUTTON_SELECTORS = [
+    'button[aria-label="Add source"]',
+    'button.add-source-button',
+    'button[mattooltip="Add source"]',
+    'button[mat-stroked-button]:text-is("Add")',
+    'button:has-text("+ Add")',
+]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -787,6 +803,122 @@ class NotebookLMAutomator:
             except Exception:
                 pass
 
+    async def ask_notebook(self, question: str, notebook_id: str = None,
+                           timeout: int = 180) -> Optional[Dict[str, Any]]:
+        """
+        Ask the notebook's chat a question and return its answer as Markdown.
+
+        The answer is complete when its card shows "Copy model response to
+        clipboard"; citations are kept as [n] (observed 2026-10-06).
+        """
+        from .report_export import REPORT_TO_MARKDOWN_JS
+        if notebook_id and not await self.navigate_to_notebook(notebook_id=notebook_id):
+            return None
+        box = self.page.locator('textarea[aria-label="Query box"]')
+        if await box.count() == 0:
+            self.logger.error("❌ Chat query box not found")
+            return None
+        done_marker = '.to-user-container button[aria-label="Copy model response to clipboard"]'
+        answered_before = await self.page.locator(done_marker).count()
+        await box.first.fill(question)
+        await box.first.press('Enter')
+        self.logger.info(f"💬 Asked: {question[:80]}")
+
+        start = time.time()
+        while time.time() - start < timeout:
+            await self.page.wait_for_timeout(2000)
+            if await self.page.locator(done_marker).count() > answered_before:
+                break
+        else:
+            self.logger.error(f"❌ No answer within {timeout}s")
+            return None
+
+        content = self.page.locator('.to-user-container .message-content').last
+        answer = (await content.evaluate(REPORT_TO_MARKDOWN_JS)).strip()
+        if not answer:
+            answer = (await content.inner_text()).strip()
+        return {
+            'question': question,
+            'answer': answer,
+            'answer_seconds': int(time.time() - start),
+            'asked_at': datetime.now().isoformat(),
+        }
+
+    async def open_artifact_card(self, card, play: bool = False) -> bool:
+        """
+        Open a Studio card in its viewer, as a person would on screen.
+
+        With ``play`` an Audio or Video Overview card is started with its
+        own Play button instead. An Interactive report opens full-screen as a
+        guided view with a table of contents and its embedded studio items.
+        """
+        if play:
+            play_button = await card.query_selector('button[aria-label="Play"]')
+            if play_button:
+                await play_button.click()
+                await self.page.wait_for_timeout(1500)
+                return True
+        opener = await card.query_selector('button.artifact-stretched-button')
+        if not opener:
+            return False
+        await opener.click()
+        await self.page.wait_for_timeout(2000)
+        return True
+
+    async def close_artifact_viewer(self) -> None:
+        """Close whatever artifact viewer or player is open in the Studio panel."""
+        for selector in (
+            'button[aria-label="Close report viewer"]',
+            'button[aria-label^="Close "][aria-label$="overview"]',
+            'artifact-viewer button[aria-label="Close"]',
+        ):
+            button = self.page.locator(selector)
+            if await button.count() > 0:
+                try:
+                    await button.first.click(timeout=3000)
+                    await self.page.wait_for_timeout(800)
+                    return
+                except Exception:
+                    continue
+        await self.page.keyboard.press('Escape')
+
+    async def save_report_card(self, card, output_stem: str, title: str = None):
+        """
+        Save a Report card's content as Markdown and HTML.
+
+        Reports have no file download (Document reports only export to
+        Google Docs/Sheets), so the content is read from the open viewer.
+
+        Returns:
+            ({'path': <md>, 'html_path': <html>}, None) on success,
+            (None, reason) otherwise.
+        """
+        from .report_export import (
+            REPORT_TO_MARKDOWN_JS, REPORT_VIEWER_SELECTOR, report_html_document,
+        )
+        if not await self.open_artifact_card(card):
+            return None, 'card cannot be opened'
+        try:
+            viewer = self.page.locator(REPORT_VIEWER_SELECTOR)
+            try:
+                await viewer.first.wait_for(state='visible', timeout=20000)
+            except Exception:
+                return None, 'report viewer did not open'
+            markdown = await viewer.first.evaluate(REPORT_TO_MARKDOWN_JS)
+            inner_html = await viewer.first.inner_html()
+            if not markdown.strip():
+                return None, 'report viewer was empty'
+            os.makedirs(os.path.dirname(os.path.abspath(output_stem)), exist_ok=True)
+            md_path, html_path = output_stem + '.md', output_stem + '.html'
+            heading = f'# {title}\n\n' if title and not markdown.startswith('# ') else ''
+            with open(md_path, 'w', encoding='utf-8') as f:
+                f.write(heading + markdown)
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(report_html_document(title or 'Report', inner_html))
+            return {'path': md_path, 'html_path': html_path}, None
+        finally:
+            await self.close_artifact_viewer()
+
     _NOT_DOWNLOADABLE_REASONS = ('card has no More menu', 'no Download item in card menu')
 
     async def _download_card_via_menu(self, card, output_path: str,
@@ -845,15 +977,7 @@ class NotebookLMAutomator:
                     if title_el and (await title_el.inner_text()).strip() == title.strip():
                         return card
                     continue
-                label = None
-                described = await card.query_selector('[aria-description]')
-                if described:
-                    label = await described.get_attribute('aria-description')
-                if not get_artifact_spec(label or ''):
-                    icon_el = await card.query_selector('.artifact-icon')
-                    label = family_label_from_icon(
-                        (await icon_el.inner_text()).strip() if icon_el else None)
-                if label == family_label:
+                if await self._card_family_label(card) == family_label:
                     return card
             except Exception:
                 continue
@@ -882,7 +1006,9 @@ class NotebookLMAutomator:
             await self.dismiss_rebrand_modal()
 
             # Wait for a selector that indicates the main interface is loaded
-            ready_selector = 'button[aria-label="Create new notebook"]';
+            # The home page button reads "New notebook" since the Gemini
+            # Notebook UI (observed 2026-10-06); older builds said "Create new notebook".
+            ready_selector = 'button[aria-label="New notebook"], button[aria-label="Create new notebook"]'
             await self.page.wait_for_selector(ready_selector, timeout=navigation_timeout)
             
             # Check if we're on the correct page
@@ -1058,13 +1184,7 @@ class NotebookLMAutomator:
 
             # Check if notebook already has sources - if so, click "+ Add" button first
             # ♠️ Jerry: When sources exist, need to click Add button to show upload options
-            add_button_selectors = [
-                'button.add-source-button',                          # Specific class
-                'button[aria-label="Add source"]',                   # Exact aria-label
-                'button[mattooltip="Add source"]',                   # Mat tooltip
-                'button[mat-stroked-button]:has-text("Add")',        # Mat stroked button with Add text
-                'button:has-text("Add")',                            # Fallback
-            ]
+            add_button_selectors = ADD_SOURCE_BUTTON_SELECTORS
 
             for selector in add_button_selectors:
                 try:
@@ -1236,11 +1356,7 @@ class NotebookLMAutomator:
 
             # Check if notebook already has sources - if so, click "+ Add" button first
             # ♠️ Jerry: When sources exist, need to click Add button to show upload options
-            add_button_selectors = [
-                'button:has-text("Add")',
-                'button[aria-label*="Add"]',
-                'button:has-text("+ Add")'
-            ]
+            add_button_selectors = ADD_SOURCE_BUTTON_SELECTORS
 
             for selector in add_button_selectors:
                 try:
@@ -1257,11 +1373,14 @@ class NotebookLMAutomator:
 
             # Detect URL type and select appropriate chip
             # ♠️ Jerry: YouTube URLs need YouTube chip, others need Website chip
+            # Since the Gemini Notebook UI (observed 2026-10-06) one "Websites"
+            # option takes Website and YouTube URLs alike, several at once.
             is_youtube = 'youtube.com' in url.lower() or 'youtu.be' in url.lower()
 
             if is_youtube:
                 chip_type = "YouTube"
                 chip_selectors = [
+                    'button:has-text("Websites")',
                     'mat-chip:has-text("YouTube")',
                     'button:has-text("YouTube")',
                     'mat-chip:has(mat-icon:has-text("video_youtube"))',
@@ -1270,6 +1389,7 @@ class NotebookLMAutomator:
             else:
                 chip_type = "Website"
                 chip_selectors = [
+                    'button:has-text("Websites")',
                     'mat-chip:has-text("Website")',
                     'button:has-text("Website")',
                     '[aria-label*="Website"]'
@@ -1324,6 +1444,7 @@ class NotebookLMAutomator:
             self.logger.info("🔍 Looking for URL input field...")
             url_input_selectors = [
                 # NotebookLM uses a textarea for URL input!
+                'textarea[formcontrolname="urls"]',
                 '.cdk-overlay-pane textarea',
                 'div[role="dialog"] textarea',
                 'textarea[formcontrolname="newUrl"]',
@@ -2036,25 +2157,18 @@ class NotebookLMAutomator:
                     data = await self._extract_artifact_metadata(card)
                     data['dom_index'] = dom_index
                     try:
-                        described = await card.query_selector('[aria-description]')
-                        if described:
-                            data['family_label'] = await described.get_attribute('aria-description')
+                        data['family_label'] = await self._card_family_label(card)
                     except Exception:
                         data['family_label'] = None
-                    # Some families (Mind Map) only carry the generic
-                    # aria-description "Artifact"; the card icon names them.
-                    if not get_artifact_spec(data.get('family_label') or ''):
-                        try:
-                            icon_el = await card.query_selector('.artifact-icon')
-                            icon = (await icon_el.inner_text()).strip() if icon_el else None
-                            data['family_label'] = family_label_from_icon(icon) or data.get('family_label')
-                        except Exception:
-                            pass
                     try:
                         play_button = await card.query_selector('button[aria-label="Play"]')
                         data['playable'] = play_button is not None
                     except Exception:
                         data['playable'] = False
+                    try:
+                        data['generating'] = await card.query_selector(GENERATING_CARD_MARKER) is not None
+                    except Exception:
+                        data['generating'] = False
                     artifacts.append(data)
                 except Exception:
                     continue
@@ -2109,7 +2223,7 @@ class NotebookLMAutomator:
                 detected = await self.detect_completed_artifact(artifact_type)
                 if detected:
                     current_count = await self._count_completed_cards(artifact_type)
-                    if current_count > baseline_count or baseline_count == 0:
+                    if current_count > baseline_count:
                         result = await self._resolve_new_artifact(
                             detected, artifact_type, baseline_count, baseline_keys
                         )
@@ -2144,26 +2258,49 @@ class NotebookLMAutomator:
             self.logger.error(f"❌ Error monitoring generation: {e}")
             return None
 
-    async def _count_completed_cards(self, artifact_type: str) -> int:
-        """Count visible completed cards for an artifact family."""
+    async def _card_family_label(self, card) -> Optional[str]:
+        """
+        The family a Studio card belongs to: its aria-description when that
+        names a known family, else the family its .artifact-icon names
+        (Mind Map cards say only "Artifact").
+        """
+        label = None
+        described = await card.query_selector('[aria-description]')
+        if described:
+            label = await described.get_attribute('aria-description')
+        spec = get_artifact_spec(label or '')
+        if spec:
+            return spec['label']
+        icon_el = await card.query_selector('.artifact-icon')
+        icon = (await icon_el.inner_text()).strip() if icon_el else None
+        return family_label_from_icon(icon) or label
+
+    async def _ready_family_cards(self, artifact_type: str) -> list:
+        """Visible cards of a family that have finished generating."""
         spec = get_artifact_spec(artifact_type)
         label = spec['label'] if spec else None
         if not label or not self.page:
-            return 0
+            return []
         try:
-            cards = await self.page.query_selector_all(
-                f'artifact-library-item:has([aria-description="{label}"])'
-            )
-            visible = 0
-            for card in cards:
-                try:
-                    if await card.is_visible():
-                        visible += 1
-                except Exception:
-                    continue
-            return visible
+            cards = await self.page.query_selector_all(ARTIFACT_CARD_SELECTOR)
         except Exception:
-            return 0
+            return []
+        ready = []
+        for card in cards:
+            try:
+                if not await card.is_visible():
+                    continue
+                if await card.query_selector(GENERATING_CARD_MARKER):
+                    continue
+                if await self._card_family_label(card) == label:
+                    ready.append(card)
+            except Exception:
+                continue
+        return ready
+
+    async def _count_completed_cards(self, artifact_type: str) -> int:
+        """Count visible completed cards for an artifact family."""
+        return len(await self._ready_family_cards(artifact_type))
 
     async def _card_identity(self, card) -> str:
         """
@@ -2183,6 +2320,12 @@ class NotebookLMAutomator:
             except Exception:
                 continue
 
+        artifact_uuid = await self._card_artifact_uuid(card)
+        if artifact_uuid:
+            return f'artifact:{artifact_uuid}'
+
+        # Title only: the details line carries a relative time ("· 2m ago")
+        # that changes between two snapshots.
         parts: List[str] = []
         try:
             described = await card.query_selector('[aria-description]')
@@ -2196,13 +2339,18 @@ class NotebookLMAutomator:
                 parts.append((await title_el.inner_text()).strip())
         except Exception:
             pass
+        return 'fp:' + '|'.join(parts)
+
+    @staticmethod
+    async def _card_artifact_uuid(card) -> Optional[str]:
+        """The artifact's UUID, carried by an inner id="artifact-labels-<uuid>"."""
         try:
-            details_el = await card.query_selector('.artifact-details')
-            if details_el:
-                parts.append(' '.join((await details_el.inner_text()).split()))
+            labels = await card.query_selector('[id^="artifact-labels-"]')
+            if labels:
+                return (await labels.get_attribute('id'))[len('artifact-labels-'):] or None
         except Exception:
             pass
-        return 'fp:' + '|'.join(parts)
+        return None
 
     async def _completed_card_snapshot(self, artifact_type: str) -> List[Dict[str, Any]]:
         """
@@ -2212,26 +2360,13 @@ class NotebookLMAutomator:
         :meth:`_card_identity`), enabling a baseline-vs-current set diff that
         names the NEW card instead of the first-matched one.
         """
-        spec = get_artifact_spec(artifact_type)
-        label = spec['label'] if spec else None
         type_key = normalize_artifact_type(artifact_type) or artifact_type
         snapshot: List[Dict[str, Any]] = []
         if not self.page:
             return snapshot
 
-        selector = (
-            f'artifact-library-item:has([aria-description="{label}"])'
-            if label else 'artifact-library-item'
-        )
-        try:
-            cards = await self.page.query_selector_all(selector)
-        except Exception:
-            return snapshot
-
-        for card in cards:
+        for card in await self._ready_family_cards(artifact_type):
             try:
-                if not await card.is_visible():
-                    continue
                 meta = await self._extract_artifact_metadata(card)
                 meta['status'] = 'completed'
                 meta['type'] = type_key
@@ -2261,7 +2396,8 @@ class NotebookLMAutomator:
             snapshot = await self._completed_card_snapshot(artifact_type)
             added = [c for c in snapshot if c.get('card_key') not in baseline_keys]
             if added:
-                new_card = added[-1]
+                # The Studio list is newest-first.
+                new_card = added[0]
                 new_card.pop('card_key', None)
                 return new_card
         return detected
@@ -2288,9 +2424,14 @@ class NotebookLMAutomator:
         length: str = None,
         focus_prompt: str = None,
         notebook_id: str = None,
+        template: str = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Generate any Studio artifact through its tile + customization dialog.
+
+        Reports have their own dialog ("Create report"): a format
+        (Interactive or Document), a template, and a Customize Report form
+        with a language and a free prompt; ``template`` names the template.
 
         Covers the whole current Studio family: Slide Deck, Video Overview,
         Mind Map, Reports, Flashcards, Quiz, Infographic, Data Table.
@@ -2360,110 +2501,15 @@ class NotebookLMAutomator:
             baseline_count = len(baseline_snapshot)
             baseline_keys = {c['card_key'] for c in baseline_snapshot}
 
-            # Open the tile → customization dialog.
-            dialog = self.page.get_by_role('dialog').filter(has_text=label)
-            if await dialog.count() == 0:
-                tile_candidates = [
-                    self.page.get_by_role('button', name=label, exact=False),
-                    self.page.get_by_text(label, exact=False),
-                ]
-                for tile in tile_candidates:
-                    try:
-                        if await tile.count() > 0:
-                            await tile.first.click(timeout=10000)
-                            await self.page.wait_for_timeout(1500)
-                            dialog = self.page.get_by_role('dialog').filter(has_text=label)
-                            if await dialog.count() > 0:
-                                break
-                    except Exception:
-                        continue
-
             generation_start_time = time.time()
-            dialog_open = await dialog.count() > 0
-
-            if dialog_open:
-                dialog = dialog.first
-
-                if format_display:
-                    selected = False
-                    for option in [
-                        dialog.get_by_role('radio', name=format_display, exact=False),
-                        dialog.get_by_text(format_display, exact=False),
-                    ]:
-                        try:
-                            if await option.count() > 0:
-                                await option.first.click(timeout=5000)
-                                await self.page.wait_for_timeout(400)
-                                selected = True
-                                break
-                        except Exception:
-                            continue
-                    if selected:
-                        self.logger.info(f"✅ Format selected: {format_display}")
-                    else:
-                        self.logger.warning(f"⚠️ Could not select format '{format_display}', using default")
-
-                if language and spec.get('supports_language'):
-                    await self._select_dialog_language(dialog, language)
-
-                if length and spec.get('supports_length'):
-                    length_display = length.strip().capitalize()
-                    try:
-                        toggle = dialog.get_by_role('button', name=length_display, exact=False)
-                        if await toggle.count() > 0:
-                            await toggle.first.click(timeout=5000)
-                            self.logger.info(f"✅ Length selected: {length_display}")
-                        else:
-                            self.logger.warning(f"⚠️ Could not find length option '{length_display}'")
-                    except Exception:
-                        self.logger.warning(f"⚠️ Could not select length '{length_display}'")
-
-                if focus_prompt and spec.get('supports_focus_prompt'):
-                    focus_text = focus_prompt[:5000]
-                    filled = False
-                    try:
-                        textarea = dialog.locator('textarea')
-                        if await textarea.count() > 0:
-                            await textarea.first.fill(focus_text)
-                            filled = True
-                    except Exception:
-                        pass
-                    if not filled:
-                        try:
-                            textboxes = dialog.get_by_role('textbox')
-                            count = await textboxes.count()
-                            if count > 0:
-                                # Prefer the last textbox in case search fields precede it.
-                                await textboxes.nth(count - 1).fill(focus_text)
-                                filled = True
-                        except Exception:
-                            pass
-                    if filled:
-                        self.logger.info(f"✅ Focus prompt entered ({len(focus_text)} chars)")
-                    else:
-                        self.logger.warning("⚠️ Could not find prompt field in dialog")
-
-                # Generate — resolved INSIDE the dialog, never globally.
-                clicked = False
-                for generate in [
-                    dialog.get_by_role('button', name='Generate', exact=False),
-                    dialog.get_by_text('Generate', exact=False),
-                ]:
-                    try:
-                        if await generate.count() > 0:
-                            await generate.first.click(timeout=10000)
-                            clicked = True
-                            break
-                    except Exception:
-                        continue
-
-                if not clicked:
-                    self.logger.error("❌ Could not click Generate in dialog")
-                    return None
+            if type_key == 'reports':
+                started = await self._drive_report_dialog(
+                    format_display, template, language, focus_prompt)
             else:
-                # Some tiles start generation immediately without a dialog;
-                # continue to monitoring rather than treating this as failure.
-                self.logger.info("ℹ️ No customization dialog appeared — assuming generation started from tile")
+                started = await self._drive_tile_dialog(
+                    label, spec, format_display, language, length, focus_prompt)
+            if not started:
+                return None
 
             await self.page.wait_for_timeout(3000)
             self.logger.info(f"🔄 {label} generation started...")
@@ -2483,6 +2529,8 @@ class NotebookLMAutomator:
                 return None
 
             artifact_data['format'] = format_display
+            if template:
+                artifact_data['template'] = template
             artifact_data['language'] = language
             artifact_data['length'] = length
             artifact_data['focus_prompt'] = focus_prompt if focus_prompt else None
@@ -2504,6 +2552,212 @@ class NotebookLMAutomator:
             import traceback
             self.logger.error(traceback.format_exc())
             return None
+
+    async def _drive_tile_dialog(self, label: str, spec: Dict[str, Any],
+                                 format_display: Optional[str], language: Optional[str],
+                                 length: Optional[str], focus_prompt: Optional[str]) -> bool:
+        """Open a Studio tile, fill its customization dialog and press Generate."""
+        # Open the tile → customization dialog.
+        dialog = self.page.get_by_role('dialog').filter(has_text=label)
+        if await dialog.count() == 0:
+            tile_candidates = [
+                self.page.get_by_role('button', name=label, exact=False),
+                self.page.get_by_text(label, exact=False),
+            ]
+            for tile in tile_candidates:
+                try:
+                    if await tile.count() > 0:
+                        await tile.first.click(timeout=10000)
+                        await self.page.wait_for_timeout(1500)
+                        dialog = self.page.get_by_role('dialog').filter(has_text=label)
+                        if await dialog.count() > 0:
+                            break
+                except Exception:
+                    continue
+
+        dialog_open = await dialog.count() > 0
+
+        if dialog_open:
+            dialog = dialog.first
+
+            if format_display:
+                selected = False
+                for option in [
+                    dialog.get_by_role('radio', name=format_display, exact=False),
+                    dialog.get_by_text(format_display, exact=False),
+                ]:
+                    try:
+                        if await option.count() > 0:
+                            await option.first.click(timeout=5000)
+                            await self.page.wait_for_timeout(400)
+                            selected = True
+                            break
+                    except Exception:
+                        continue
+                if selected:
+                    self.logger.info(f"✅ Format selected: {format_display}")
+                else:
+                    self.logger.warning(f"⚠️ Could not select format '{format_display}', using default")
+
+            if language and spec.get('supports_language'):
+                await self._select_dialog_language(dialog, language)
+
+            if length and spec.get('supports_length'):
+                length_display = length.strip().capitalize()
+                try:
+                    toggle = dialog.get_by_role('button', name=length_display, exact=False)
+                    if await toggle.count() > 0:
+                        await toggle.first.click(timeout=5000)
+                        self.logger.info(f"✅ Length selected: {length_display}")
+                    else:
+                        self.logger.warning(f"⚠️ Could not find length option '{length_display}'")
+                except Exception:
+                    self.logger.warning(f"⚠️ Could not select length '{length_display}'")
+
+            if focus_prompt and spec.get('supports_focus_prompt'):
+                focus_text = focus_prompt[:5000]
+                filled = False
+                try:
+                    textarea = dialog.locator('textarea')
+                    if await textarea.count() > 0:
+                        await textarea.first.fill(focus_text)
+                        filled = True
+                except Exception:
+                    pass
+                if not filled:
+                    try:
+                        textboxes = dialog.get_by_role('textbox')
+                        count = await textboxes.count()
+                        if count > 0:
+                            # Prefer the last textbox in case search fields precede it.
+                            await textboxes.nth(count - 1).fill(focus_text)
+                            filled = True
+                    except Exception:
+                        pass
+                if filled:
+                    self.logger.info(f"✅ Focus prompt entered ({len(focus_text)} chars)")
+                else:
+                    self.logger.warning("⚠️ Could not find prompt field in dialog")
+
+            # Generate — resolved INSIDE the dialog, never globally.
+            clicked = False
+            for generate in [
+                dialog.get_by_role('button', name='Generate', exact=False),
+                dialog.get_by_text('Generate', exact=False),
+            ]:
+                try:
+                    if await generate.count() > 0:
+                        await generate.first.click(timeout=10000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+            if not clicked:
+                self.logger.error("❌ Could not click Generate in dialog")
+                return False
+        else:
+            # Some tiles start generation immediately without a dialog;
+            # continue to monitoring rather than treating this as failure.
+            self.logger.info("ℹ️ No customization dialog appeared — assuming generation started from tile")
+        return True
+
+    async def _drive_report_dialog(self, format_display: Optional[str], template: Optional[str],
+                                   language: Optional[str], focus_prompt: Optional[str]) -> bool:
+        """
+        Fill and submit the "Create report" dialog (observed 2026-10-06).
+
+        Format cards: Interactive ("An interactive report with embedded
+        studio content", default) and Document ("A structured text-only
+        document"). Each template is a div.option-card holding a
+        button.primary-action-button named after it and, except Create Your
+        Own, a "Customize Report" pencil that opens a language select and a
+        prompt textarea. Generate is the dialog's nb-button.generate-button.
+        """
+        spec = ARTIFACT_TYPES['reports']
+        dialog = self.page.get_by_role('dialog').filter(has_text=spec['dialog_title'])
+        if await dialog.count() == 0:
+            tile = self.page.locator('[role=button]:has-text("Reports")')
+            if await tile.count() == 0:
+                self.logger.error("❌ Reports tile not found in the Studio panel")
+                return False
+            await tile.first.click(timeout=10000)
+            await self.page.wait_for_timeout(1500)
+            if await dialog.count() == 0:
+                self.logger.error("❌ The Create report dialog did not open")
+                return False
+        dialog = dialog.first
+
+        format_display = format_display or 'Interactive'
+        format_blurbs = {
+            'Interactive': 'An interactive report with embedded studio content',
+            'Document': 'A structured text-only document',
+        }
+        await dialog.locator(f'div:has-text("{format_blurbs[format_display]}")').last.click()
+        await self.page.wait_for_timeout(1200)
+        self.logger.info(f"✅ Report format: {format_display}")
+
+        if not template:
+            template = 'Learning Overview' if format_display == 'Interactive' else (
+                'Create Your Own' if focus_prompt else 'Briefing Doc')
+        template = normalize_report_template(template)
+        card = dialog.locator(f'div.option-card:has(button.primary-action-button[aria-label="{template}"])')
+        if await card.count() == 0:
+            offered = await dialog.locator('button.primary-action-button').evaluate_all(
+                "els => els.map(e => e.getAttribute('aria-label'))")
+            self.logger.error(f"❌ Template '{template}' not offered; offered: {offered}")
+            await self._close_dialogs()
+            return False
+        card = card.first
+
+        if focus_prompt or language:
+            pencil = card.locator('button[aria-label="Customize Report"]')
+            if await pencil.count() > 0:
+                await pencil.first.click()
+            else:
+                # Create Your Own has no pencil: the card itself opens the form.
+                await card.locator('button.primary-action-button').first.click()
+            await self.page.wait_for_timeout(1500)
+            form = self.page.get_by_role('dialog').last
+            if language:
+                await self._select_dialog_language(form, language)
+            if focus_prompt:
+                prompt_box = form.locator('textarea')
+                if await prompt_box.count() == 0:
+                    self.logger.error("❌ The Customize Report form has no prompt field")
+                    await self._close_dialogs()
+                    return False
+                await prompt_box.first.fill(focus_prompt[:5000])
+                self.logger.info(f"✅ Report prompt entered ({len(focus_prompt[:5000])} chars)")
+            generate = form.get_by_role('button', name='Generate')
+        else:
+            await card.locator('button.primary-action-button').first.click()
+            await self.page.wait_for_timeout(600)
+            generate = dialog.locator('nb-button.generate-button button')
+            if await self.page.get_by_role('dialog').count() == 0:
+                # Some templates start generation as soon as they are picked.
+                self.logger.info(f"✅ Report template '{template}' started generation")
+                return True
+
+        self.logger.info(f"✅ Report template: {template}")
+        if await generate.count() == 0:
+            self.logger.error("❌ Generate button not found in the report dialog")
+            await self._close_dialogs()
+            return False
+        await generate.first.click(timeout=10000)
+        return True
+
+    async def _close_dialogs(self) -> None:
+        """Close any open dialog by its Close button."""
+        for _ in range(3):
+            close = self.page.get_by_role('dialog').locator('button[aria-label="Close"]')
+            if await close.count() == 0:
+                return
+            try:
+                await close.first.click(timeout=3000)
+                await self.page.wait_for_timeout(500)
+            except Exception:
+                return
 
     async def _select_dialog_language(self, dialog, language: str) -> bool:
         """Select an output language inside a Studio customization dialog."""
@@ -2659,6 +2913,9 @@ class NotebookLMAutomator:
                         break
                 except:
                     continue
+
+            if not artifact_id:
+                artifact_id = await self._card_artifact_uuid(artifact_element)
 
             # If no ID attribute, generate one
             if not artifact_id:
@@ -2941,6 +3198,29 @@ class NotebookLMAutomator:
                     manifest['failed'].append({'title': title, 'reason': 'card disappeared'})
                     continue
 
+                if artifact.get('generating'):
+                    manifest['skipped'].append({'title': title, 'reason': f'{family_label}: still generating'})
+                    continue
+
+                if family_label == 'Reports':
+                    saved, reason = await self.save_report_card(cards[dom_index], output_path, title=title)
+                    if not saved:
+                        manifest['failed'].append({'title': title, 'reason': f'{family_label}: {reason}'})
+                        continue
+                    entry = {
+                        'title': title,
+                        'family_label': family_label,
+                        'artifact_id': artifact.get('artifact_id'),
+                        'path': saved['path'],
+                        'html_path': saved['html_path'],
+                        'size': os.path.getsize(saved['path']),
+                        'sha256': self._sha256_file(saved['path']),
+                        'downloaded_at': datetime.now().isoformat(),
+                    }
+                    manifest['downloads'].append(entry)
+                    self.logger.info(f"✅ Saved report: {title} → {saved['path']}")
+                    continue
+
                 # The card's own menu decides: a family is downloadable exactly
                 # when its menu offers Download (Mind Map, for one, does not).
                 saved_path, reason = await self._download_card_via_menu(cards[dom_index], output_path)
@@ -3005,6 +3285,7 @@ class NotebookLMAutomator:
 
             # Multi-selector strategy for create button
             create_selectors = [
+                'button[aria-label="New notebook"]',
                 'button[aria-label="Create new notebook"]',
                 'button:has-text("Create new notebook")',
                 'button:has-text("New notebook")',
@@ -3040,6 +3321,15 @@ class NotebookLMAutomator:
                 # If load state times out, continue anyway - the navigation might still have worked
                 self.logger.warning("⚠️ Load state timeout, but continuing...")
                 pass
+
+            # The app first routes to /notebook/creating and only then to
+            # /notebook/<uuid>; reloading the transient route hangs on
+            # "Creating your notebook..." (observed 2026-10-06).
+            try:
+                await self.page.wait_for_url(
+                    re.compile(r'/notebook/[0-9a-f]{8}-[0-9a-f]{4}-'), timeout=60000)
+            except Exception:
+                self.logger.warning(f"⚠️ Notebook URL has no ID yet: {self.page.url}")
 
             # Get the new URL
             new_url = self.page.url
