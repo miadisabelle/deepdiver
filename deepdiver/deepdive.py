@@ -795,34 +795,44 @@ def notebook_open(notebook_id: str, config: str):
 
 @notebook.command(name='add-source')
 @click.argument('notebook_id')
-@click.argument('source')
-@click.option('--name', '-n', help='Custom name for the source')
+@click.argument('sources', nargs=-1, required=True)
+@click.option('--name', '-n', help='Custom name for the source (one source only)')
 @click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
               help='Path to configuration file')
-def notebook_add_source(notebook_id: str, source: str, name: Optional[str], config: str):
-    """Add a source to an existing notebook.
+def notebook_add_source(notebook_id: str, sources: tuple, name: Optional[str], config: str):
+    """Add one or more sources to an existing notebook.
 
-    SOURCE can be:
+    Each SOURCE can be:
     - SimExp URL: https://app.simplenote.com/p/[NOTE_ID]
     - Web URL: https://example.com/article
-    - YouTube URL: https://youtube.com/watch?v=...
+    - YouTube URL: https://youtube.com/watch?v=... (public videos; the transcript is imported)
     - Local file: ./document.pdf
 
+    All URLs go into the notebook in one insert; files are uploaded one by
+    one. Exits 1 if any source could not be added.
+
     Examples:
-        deepdiver notebook add-source abc-123 "https://app.simplenote.com/p/xyz"
         deepdiver notebook add-source abc-123 "https://youtube.com/watch?v=xyz"
-        deepdiver notebook add-source abc-123 ./research.pdf
+        deepdiver notebook add-source abc-123 ./review-a.md ./review-b.md https://youtu.be/a https://youtu.be/b
     """
-    console.print(f"📄 Adding source to notebook: {notebook_id}", style="blue")
+    if name and len(sources) > 1:
+        console.print("❌ --name applies to a single source", style="red")
+        sys.exit(2)
+    urls = [s for s in sources if s.startswith(('http://', 'https://'))]
+    files = [s for s in sources if not s.startswith(('http://', 'https://'))]
+    console.print(f"📄 Adding {len(sources)} source(s) to notebook: {notebook_id}", style="blue")
 
-    # Detect source type for better messaging
-    if source.startswith(('http://', 'https://')):
-        console.print(f"🔗 Source URL: {source}", style="cyan")
-    else:
-        console.print(f"📎 Source file: {source}", style="cyan")
-
-    if name:
-        console.print(f"🏷️  Custom name: {name}", style="cyan")
+    def source_record(source: str) -> dict:
+        if source.startswith(('http://', 'https://')):
+            return {'filename': name or source, 'path': source, 'type': 'url', 'size': 0}
+        from pathlib import Path
+        source_path = Path(source)
+        return {
+            'filename': name or source_path.name,
+            'path': source,
+            'type': source_path.suffix[1:] if source_path.suffix else 'unknown',
+            'size': source_path.stat().st_size if source_path.exists() else 0,
+        }
 
     async def run_add_source():
         from .notebooklm_automator import NotebookLMAutomator
@@ -831,74 +841,54 @@ def notebook_add_source(notebook_id: str, source: str, name: Optional[str], conf
         automator = NotebookLMAutomator(config)
         tracker = SessionTracker()
         tracker._load_current_session()
+        failed = []
 
         try:
-            # Verify notebook exists in session
-            notebook = None
-            if tracker.current_session:
-                notebook = tracker.get_notebook_by_id(notebook_id)
-                if not notebook:
-                    console.print(f"⚠️  Notebook {notebook_id} not found in session", style="yellow")
-                    console.print("💡 The notebook will still be added to if it exists in NotebookLM", style="dim")
+            if tracker.current_session and not tracker.get_notebook_by_id(notebook_id):
+                console.print(f"⚠️  Notebook {notebook_id} not found in session", style="yellow")
 
-            # Connect to browser
             if not await automator.connect_to_browser():
                 console.print("❌ Failed to connect to browser", style="red")
                 console.print("💡 Make sure Chrome is running with: deepdiver init", style="yellow")
-                return
+                return False
 
-            # Add source to the specified notebook (handles both URLs and files)
-            console.print(f"📤 Adding source to notebook...", style="blue")
-            result_notebook_id = await automator.add_source(source, notebook_id=notebook_id)
-
-            if result_notebook_id:
-                console.print("✅ Source added successfully!", style="green")
-                console.print(f"📋 Notebook ID: {result_notebook_id}", style="cyan")
-
-                # Track source in session
+            batches = ([('\n'.join(urls), urls)] if urls else []) + [(f, [f]) for f in files]
+            for payload, members in batches:
+                console.print(f"📤 Adding: {', '.join(members)}", style="blue")
+                if payload in files:
+                    result_id = await automator.add_source(payload, notebook_id=notebook_id)
+                else:
+                    result_id = await automator.add_url_source(payload, notebook_id=notebook_id)
+                not_imported = {e['title']: e['reason'] for e in automator.last_source_errors}
+                automator.last_source_errors = []
+                for member in members:
+                    if member in not_imported:
+                        console.print(f"❌ Not imported: {member} — {not_imported[member]}", style="red")
+                if not result_id:
+                    if not not_imported:
+                        console.print(f"❌ Not added: {', '.join(members)}", style="red")
+                    failed.extend(members)
+                    continue
+                failed.extend(m for m in members if m in not_imported)
                 if tracker.current_session:
-                    # Determine source type and create metadata
-                    if source.startswith(('http://', 'https://')):
-                        # URL source
-                        source_data = {
-                            'filename': name or source,
-                            'path': source,
-                            'type': 'url',
-                            'size': 0  # Unknown for URLs
-                        }
-                    else:
-                        # File source
-                        from pathlib import Path
-                        source_path = Path(source)
-                        source_data = {
-                            'filename': name or source_path.name,
-                            'path': source,
-                            'type': source_path.suffix[1:] if source_path.suffix else 'unknown',
-                            'size': source_path.stat().st_size if source_path.exists() else 0
-                        }
+                    for member in members:
+                        if member not in not_imported:
+                            tracker.add_source_to_notebook(result_id, source_record(member))
 
-                    # Add source to notebook in session
-                    if tracker.add_source_to_notebook(result_notebook_id, source_data):
-                        console.print(f"💾 Source tracked in session", style="green")
-
-                        # Display updated source count
-                        sources = tracker.list_notebook_sources(result_notebook_id)
-                        console.print(f"📚 Total sources in notebook: {len(sources)}", style="cyan")
-                    else:
-                        console.print("⚠️  Could not track source in session", style="yellow")
-
-                console.print(f"🔗 Browser kept open for next command", style="dim")
-            else:
-                console.print("❌ Failed to add source to notebook", style="red")
-                console.print("💡 Make sure the notebook ID is correct and you have permission to edit", style="yellow")
+            added = len(sources) - len(failed)
+            console.print(f"✅ {added} of {len(sources)} source(s) added", style="green" if not failed else "yellow")
+            if tracker.current_session:
+                console.print(f"📚 Sources tracked for this notebook: "
+                              f"{len(tracker.list_notebook_sources(notebook_id))}", style="cyan")
+            console.print(f"🔗 Browser kept open for next command", style="dim")
+            return not failed
 
         except Exception as e:
             console.print(f"❌ Failed to add source: {e}", style="red")
-            import traceback
-            console.print(traceback.format_exc(), style="dim")
-        # Browser stays open - no close() call
+            return False
 
-    asyncio.run(run_add_source())
+    if not asyncio.run(run_add_source()):
+        sys.exit(1)
 
 
 @notebook.command(name='ask')

@@ -104,8 +104,8 @@ A search for an "Add" button also matched the header's "Create notebook" button,
 No new package is needed under `jgwill/Miadi/packages/` to begin. DeepDiver is already a Python package with its own CLI and bundled skill. The options, in the order they depend on each other:
 
 - **O1.** Offer this fork's changes to `Gerico1007/deepdiver` as a pull request, so Jerry can release them to PyPI.
-- **O2.** Add `deepdiver` to Miadi's Python umbrella (`packages/miadi/py`, which already depends on `ironsilk`), for example as an extra `miadi[production]`, and give `scripts/ops/miadi-delivery.sh` a part that checks the installed version, as it does for `ironsilk`. Depends on O1 or on pinning this fork.
-- **O3.** A T6 plugin in the orchestration kit that carries DeepDiver's skill and its Chrome setup. Depends on T6 having an agent lead.
+- **O2.** Add `deepdiver` to Miadi's Python umbrella (`packages/miadi/py`, which already depends on `ironsilk`), for example as an extra `miadi[production]`, and give `scripts/ops/miadi-delivery.sh` a part that checks the installed version, as it does for `ironsilk`. Depends on O1: PyPI refuses a package whose dependency is a git URL, so a published `miadi` cannot depend on this fork directly.
+- **O3.** A plugin in the orchestration kit for T6. Done on 2026-10-06: `claude/miadi-deepdiver` 0.1.0 in `jgwill/miadi-orchestration-kit`, with the `screenwalk-notebook` skill and `/notebook-from-reviews`. It installs DeepDiver from this fork until O1 lands.
 
 An MCP server around DeepDiver was considered and left out: no consumer needs one yet.
 

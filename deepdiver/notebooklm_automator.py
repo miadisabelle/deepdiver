@@ -442,6 +442,7 @@ class NotebookLMAutomator:
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+        self.last_source_errors: List[Dict[str, str]] = []
         self.playwright = None
         self._connected_over_cdp = False
         self._owns_context = False
@@ -1371,6 +1372,9 @@ class NotebookLMAutomator:
                 except:
                     continue
 
+            sources_before = await self._count_sources()
+            urls_given = len(url.split())
+
             # Detect URL type and select appropriate chip
             # ♠️ Jerry: YouTube URLs need YouTube chip, others need Website chip
             # Since the Gemini Notebook UI (observed 2026-10-06) one "Websites"
@@ -1539,13 +1543,75 @@ class NotebookLMAutomator:
                 await self.page.keyboard.press('Enter')
                 await self.page.wait_for_timeout(5000)
 
-            self.logger.info("✅ URL source added successfully")
+            # Insert closes the dialog before the import finishes; a URL that
+            # cannot be imported (private or very recent video, paywall)
+            # never becomes a source row.
+            sources_after = sources_before
+            for _ in range(30):
+                sources_after = await self._count_sources()
+                if sources_after >= sources_before + urls_given:
+                    break
+                await self.page.wait_for_timeout(2000)
+            added = sources_after - sources_before
+            if added <= 0:
+                self.logger.error("❌ No source appeared after Insert")
+                return None
+            # A URL that cannot be imported still gets a row, marked as an
+            # error, titled with the bare URL (observed 2026-10-06 for videos
+            # uploaded the same day: "Transcript not available").
+            await self.page.wait_for_timeout(3000)
+            given = set(url.split())
+            self.last_source_errors = [e for e in await self._source_errors() if e['title'] in given]
+            for error in self.last_source_errors:
+                self.logger.error(f"❌ Not imported: {error['title']} — {error['reason']}")
+            imported = added - len(self.last_source_errors)
+            if imported <= 0:
+                return None
+            if imported < urls_given:
+                self.logger.warning(f"⚠️ {imported} of {urls_given} URLs became sources")
+            self.logger.info(f"✅ URL source added successfully ({imported} new)")
             self.logger.info(f"📋 Added to notebook: {current_notebook_id}")
             return current_notebook_id
 
         except Exception as e:
             self.logger.error(f"❌ Failed to add URL source: {e}")
             return None
+
+    async def _count_sources(self) -> int:
+        """Source rows in the Sources panel."""
+        try:
+            return await self.page.locator('.single-source-container').count()
+        except Exception:
+            return 0
+
+    async def _source_errors(self) -> List[Dict[str, str]]:
+        """Source rows marked as errors, with the reason their tooltip gives."""
+        errors = []
+        rows = self.page.locator('.single-source-error-container')
+        for i in range(await rows.count()):
+            row = rows.nth(i)
+            title = ''
+            try:
+                title = await row.locator('.source-title').first.inner_text()
+            except Exception:
+                pass
+            reason = 'cannot be imported'
+            try:
+                await self.page.mouse.move(0, 0)
+                await self.page.wait_for_timeout(300)
+                await row.locator('mat-icon', has_text='info').first.hover(timeout=3000)
+                for _ in range(10):
+                    await self.page.wait_for_timeout(300)
+                    tips = [t.strip() for t in
+                            await self.page.locator('.mat-mdc-tooltip, [role=tooltip]').all_inner_texts()
+                            if t.strip()]
+                    if tips:
+                        reason = tips[-1]
+                        break
+            except Exception:
+                pass
+            errors.append({'title': title.strip(), 'reason': reason})
+        return errors
 
     async def add_source(self, source: str, notebook_id: str = None) -> Optional[str]:
         """
