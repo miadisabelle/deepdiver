@@ -39,6 +39,7 @@ DeepDiver is an instrument of **T6 · Production** (after an episode). Its human
 | generate a report | `deepdiver studio report [--format document] [--template "..."] [--prompt "..."] -n <id>` |
 | see the Studio panel | `deepdiver studio list -n <id>` |
 | download everything | `deepdiver studio download -n <id> -o <dir>` |
+| download for an episode's git | `deepdiver studio download -n <id> -o <episode>/captures/notebook-<id> --keep`, or `deepdiver studio keep <dir>` after: infographics as WebP, video and audio re-encoded into `keep/`, `kept` in `manifest.json` |
 | show an artifact on screen | `deepdiver studio open --family reports -n <id>` (`--play` for audio and video) |
 
 ### Outputs

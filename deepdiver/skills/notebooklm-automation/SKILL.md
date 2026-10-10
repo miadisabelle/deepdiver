@@ -51,6 +51,8 @@ deepdiver studio slide-deck --format presenter --focus "..." -n <id>
 deepdiver studio generate <type> -n <id>        # any Studio family
 deepdiver studio list -n <id>                   # artifact cards currently visible
 deepdiver studio download -n <id> -o <dir>      # every downloadable card + reports as .md/.html + manifest.json
+deepdiver studio download -n <id> -o <dir> --keep   # also WebP infographics, video/audio re-encoded into keep/, "kept" in manifest.json
+deepdiver studio keep <dir>                     # the same keep step on a folder already downloaded
 deepdiver studio report --prompt "..." -n <id>  # Interactive report (embeds studio items); --format document --template "Briefing Doc"
 deepdiver studio open --family reports -n <id>  # show an artifact on screen; --play for audio/video
 deepdiver notebook ask <id> "question" -o asked.md   # answer as Markdown with [n] citations

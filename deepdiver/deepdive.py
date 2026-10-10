@@ -1445,10 +1445,13 @@ def studio_list(notebook_id: Optional[str], cdp_url: str, config: str):
 @click.option('--notebook-id', '-n', help='Notebook ID (uses current page if not provided)')
 @click.option('--output', '-o', default=None,
               help='Output directory (default: STUDIO_SETTINGS.artifact_download_dir)')
+@click.option('--keep', 'keep', is_flag=True, default=False,
+              help='Also make what a git repository keeps: infographics as WebP, '
+                   'video and audio re-encoded into keep/, recorded as "kept" in the manifest')
 @cdp_url_option
 @click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
               help='Path to configuration file')
-def studio_download(notebook_id: Optional[str], output: Optional[str],
+def studio_download(notebook_id: Optional[str], output: Optional[str], keep: bool,
                     cdp_url: str, config: str):
     """Download all downloadable artifacts + write manifest.json.
 
@@ -1503,12 +1506,52 @@ def studio_download(notebook_id: Optional[str], output: Optional[str],
             if manifest.get('manifest_path'):
                 console.print(f"🗂️ Manifest: {manifest['manifest_path']}", style="bold blue")
             console.print("🔗 Browser kept open for next command", style="dim")
+            if keep and manifest.get('manifest_path'):
+                if not _print_kept(os.path.dirname(manifest['manifest_path'])):
+                    return False
             return not manifest.get('failed')
         except Exception as e:
             console.print(f"❌ Error: {e}", style="red")
             return False
 
     if not asyncio.run(run_download()):
+        sys.exit(1)
+
+
+def _print_kept(folder: str) -> bool:
+    """Run the keep step on a download folder and print what it kept."""
+    from .keep import keep_folder
+    console.print("📦 Keeping for git: WebP, keep/ re-encodes...", style="blue")
+    manifest = keep_folder(folder)
+    ok = True
+    for entry in manifest.get('downloads', []):
+        if entry.get('kept'):
+            kept = entry['kept']
+            console.print(f"  • {entry['title']} → {kept['path']} ({kept['size'] / (1024 * 1024):.1f} MB)",
+                          style="cyan")
+        else:
+            ok = False
+            console.print(f"  • {entry['title']}: not kept, {entry.get('kept_error', 'unknown')}", style="red")
+    return ok
+
+
+@studio.command(name='keep')
+@click.argument('folder')
+def studio_keep(folder: str):
+    """Make what a git repository keeps from a download folder.
+
+    Infographics become WebP (quality 90, no metadata) and the PNG is removed;
+    video and audio overviews are re-encoded into keep/, the download staying
+    beside them; reports stay as they are. manifest.json records each as
+    "kept". Run it on a folder `studio download` wrote. Needs ffmpeg.
+
+    Example:
+        deepdiver studio keep <episode>/captures/notebook-<id>
+    """
+    if not os.path.isfile(os.path.join(folder, 'manifest.json')):
+        console.print(f"❌ No manifest.json in {folder}", style="red")
+        sys.exit(1)
+    if not _print_kept(folder):
         sys.exit(1)
 
 
