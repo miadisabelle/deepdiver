@@ -61,9 +61,9 @@ Each step depends on the steps it names.
 5. **Questions asked and artifacts generated.** `notebook ask` for the episode's questions; Infographic, Video Overview, Audio Overview, Mind Map; then an Interactive report whose prompt names which of those items to embed. Depends on 4.
 6. **Artifacts downloaded with their manifest.** Depends on 5.
 7. **Artifacts played in a later screenwalk**, paused and talked over. `studio open` puts an Interactive report on screen full-size, and `--play` starts an Audio or Video Overview. The recording and the talking happen outside DeepDiver. Depends on 5.
-8. **Relations recorded.** The episode cites the notebook and the downloaded files. Depends on 3 and 6.
+8. **Kept in the episode.** The notebook's media, `manifest.json` and `asked.md` go into `<episode>/captures/notebook-<notebook id>/`, as miadi-chronicle://550 keeps `captures/notebook-0ae51b4c-8ed2-4ee2-a641-2c7e88b7e2ea/`. The episode room shows that folder to the episode's readers (`jgwill/Miadi` d6f3ed7a, in `@miadi/episode-vessel` 0.4.0). Depends on 3 and 6.
 
-Steps 4 to 6, and opening an artifact in step 7, are DeepDiver's. Steps 7 and 8 as practices are proposals: no screenwalk has played a DeepDiver artifact yet, and no episode records a notebook.
+Steps 4 to 6, and opening an artifact in step 7, are DeepDiver's. Step 8 is practiced: Episode 550 keeps notebook `0ae51b4c`. Step 7 was not yet practiced when this page was written on 2026-10-06.
 
 ## Verified on 2026-10-06
 
@@ -71,7 +71,7 @@ On gaia, Chrome 154, a clone of the AVA profile (`ava@jgwill.com`):
 
 - Notebook `773f480c-0ab7-4eac-b106-bf7c7c0251e8`: `studio download` saved all six downloadable artifacts (two videos, three audios, one infographic). Their ffprobe durations match the Studio cards. The Mind Map card was reported as having no Download item.
 - Notebook `78507190-4018-41c6-9fe0-47ed17df5300`, made for this test: created with review `f9d6fb1e` as a Markdown file, then `https://youtu.be/q4I55OAkI0Y` (the screenwalk that review covers) as a second source. An Infographic generated from both, *From Screenwalk to Studio Media: The Deep Diver Pipeline*, downloaded as a 2752×1536 PNG. Mind Maps generated and were recognised as new cards. An Interactive report with a prompt (*The Miadi Media Engine: Transforming Screenwalks into Notebook Artifacts*) and a Document report from the Briefing Doc template (*Executive Briefing: …*) generated, and `studio download` saved all four reports in the notebook, two of them Guillaume's, as Markdown and HTML. `notebook ask` returned a cited answer, and `studio open` opened the newest report.
-- Notebook `0ae51b4c-8ed2-4ee2-a641-2c7e88b7e2ea`, Episode 550's screenwalk practice: reviews `d64a2fdf`, `6c3f477f`, `b2558ceb` and `6a2b5b59` as Markdown, their four videos in one insert, and the stored transcript of screenwalk `2610061207`. Two of the videos, uploaded that day, could not be imported ("Transcript not available"), and the transcript stood in for one of them. Two questions were answered with citations (`asked.md`). An infographic (*Screenwalk Lifecycle Process Diagram*), a Video Overview (*How Screenwalks Transform Developer Captures*, a 69-second vertical Short that took 17 minutes) and an Interactive report embedding both were generated and downloaded.
+- Notebook `0ae51b4c-8ed2-4ee2-a641-2c7e88b7e2ea`, Episode 550's screenwalk practice: reviews `d64a2fdf`, `6c3f477f`, `b2558ceb` and `6a2b5b59` as Markdown, their four videos in one insert, and the stored transcript of screenwalk `2610061207`. Two of the videos, uploaded that day, could not be imported ("Transcript not available"), and the transcript stood in for one of them. Two questions were answered with citations (`asked.md`). An infographic (*Screenwalk Lifecycle Process Diagram*), a Video Overview (*How Screenwalks Transform Developer Captures*, a 69-second vertical Short that took 17 minutes) and an Interactive report embedding both were generated and downloaded. The report file saved then was the notebook's first chat answer, a defect fixed in 9cefb64.
 
 ## What the interface changed, and what was fixed
 
@@ -116,7 +116,9 @@ An MCP server around DeepDiver was considered and left out: no consumer needs on
 ## Open, each with its owner
 
 - **Q1.** The team's name, D11. William.
-- **Q2.** Whether to open the pull request of O1 to Jerry's repository. Guillaume.
+- **Q2.** Answered for now. On 2026-10-08 William wrote that Jerry's repository is one he is "not so entertained in contributing" to right now, so the pull request of O1 is not opened, and O2 waits with it.
 - **Q3.** Whether O2 goes into `jgwill/Miadi`. Guillaume.
-- **Q4.** Where an episode keeps downloaded artifacts. A proposal: `<episode>/captures/<stem>/notebook/` with the manifest.
+- **Q4.** Settled by practice. An episode keeps a notebook's media in `<episode>/captures/notebook-<notebook id>/` with `manifest.json` and `asked.md`, as miadi-chronicle://550 keeps `captures/notebook-0ae51b4c-8ed2-4ee2-a641-2c7e88b7e2ea/`, and `jgwill/Miadi` d6f3ed7a, in `@miadi/episode-vessel` 0.4.0, serves that shape to the episode's readers.
 - **Q5.** Whether to delete the three empty "Untitled notebook" notebooks and the test notebook `78507190…`. The AVA account's owner.
+
+Deep Diver's open items are kept in miadi-chronicle://251, `2026-07-19-episode-251-deepdiver/owner/open-261009.md`.
