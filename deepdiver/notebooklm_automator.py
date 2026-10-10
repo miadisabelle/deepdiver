@@ -85,6 +85,22 @@ def _is_google_signin_url(url: Optional[str]) -> bool:
         return False
 
 
+def _is_signed_out_url(url: Optional[str]) -> bool:
+    """True for the pages a signed-out profile lands on.
+
+    Google's sign-in (accounts.google.com), and the Gemini Notebook landing
+    page /trynow, which a signed-out profile is sent to instead of the notebook
+    list (2026-10-09: a cloned profile opened notebook.google.com/trynow).
+    """
+    from urllib.parse import urlparse
+    if _is_google_signin_url(url):
+        return True
+    try:
+        return _is_notebooklm_host(url) and urlparse(url or '').path.startswith('/trynow')
+    except Exception:
+        return False
+
+
 # The button that opens the add-source dialog. Never a bare
 # button:has-text("Add"): the header's "Create notebook" button renders its
 # icon ligature as text ("add_2 Create notebook"), so that substring match
@@ -346,11 +362,105 @@ def clone_chrome_profile(source_profile: str,
         return None
 
 
+# DeepDiver's own Chrome home. A person signs in to Google here once, and every
+# later launch reuses it. Cloning a profile into a fresh folder on each launch
+# did not carry the Google session (2026-10-09), so each run asked for a new
+# sign-in.
+DEFAULT_USER_DATA_DIR = os.path.expanduser('~/.chrome-deepdiver')
+
+
+def _user_data_dir_in_use(user_data_dir: str) -> bool:
+    """True when a Chrome holds this user-data-dir (its SingletonLock exists)."""
+    return os.path.lexists(os.path.join(user_data_dir, 'SingletonLock'))
+
+
+def adopt_user_data_dir(source_dir: str, dest_dir: str = None) -> Optional[str]:
+    """
+    Move a user-data-dir that is already signed in to Google into DeepDiver's
+    home, so later launches reuse that sign-in.
+
+    Refuses (returns None) when the source is not a Chrome user-data-dir, when
+    a Chrome still holds it, or when the destination already exists. Nothing
+    is overwritten or merged.
+    """
+    dest_dir = os.path.expanduser(dest_dir or DEFAULT_USER_DATA_DIR)
+    source_dir = os.path.expanduser(source_dir)
+    if not os.path.isfile(os.path.join(source_dir, 'Local State')):
+        return None
+    if _user_data_dir_in_use(source_dir):
+        return None
+    if os.path.exists(dest_dir):
+        return None
+    os.makedirs(os.path.dirname(dest_dir) or '.', exist_ok=True)
+    shutil.move(source_dir, dest_dir)
+    return dest_dir
+
+
+def resolve_launch_dir(user_data_dir: str = None, clone_from_profile: str = None,
+                       profile_root: str = None, fresh: bool = False) -> Optional[str]:
+    """
+    Decide which user-data-dir a launch uses, seeding it from a profile only
+    when it does not exist yet.
+
+    - fresh: clone into a new temporary folder (the old behaviour).
+    - otherwise the folder is user_data_dir, or DeepDiver's home. If it holds a
+      'Local State' it is reused as it is, signed-in session included. If not,
+      and a profile to clone is named, it is seeded from that profile once.
+    """
+    if fresh and clone_from_profile:
+        return clone_chrome_profile(clone_from_profile, profile_root=profile_root)
+    target = os.path.expanduser(user_data_dir or DEFAULT_USER_DATA_DIR)
+    if os.path.isfile(os.path.join(target, 'Local State')):
+        return target
+    if clone_from_profile:
+        if os.path.exists(target) and os.listdir(target):
+            return None  # a non-empty folder that is not a Chrome home: never replaced
+        return clone_chrome_profile(clone_from_profile, profile_root=profile_root,
+                                    dest_dir=target)
+    return target
+
+
+async def _probe_signed_in(cdp_url: str) -> Optional[bool]:
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(cdp_url)
+        try:
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            page = await context.new_page()
+            try:
+                await page.goto('https://notebook.google.com/', timeout=30000)
+                try:
+                    await page.wait_for_load_state('load', timeout=10000)
+                except Exception:
+                    pass
+                return not _is_signed_out_url(page.url)
+            finally:
+                await page.close()
+        finally:
+            await browser.close()
+
+
+def check_signed_in(cdp_url: str = 'http://localhost:9222') -> Optional[bool]:
+    """
+    Is the Chrome on this CDP address signed in to Gemini Notebook?
+
+    Opens the notebook home in a new tab, reads where it lands, and closes
+    that tab. True when it stays on the notebook list, False when it lands on
+    Google's sign-in or /trynow, None when CDP does not answer.
+    """
+    if not check_chrome_cdp_running(cdp_url):
+        return None
+    try:
+        return asyncio.run(_probe_signed_in(cdp_url))
+    except Exception:
+        return None
+
+
 def launch_chrome_cdp(port: int = 9222, user_data_dir: str = None,
                       profile_directory: str = None,
                       clone_from_profile: str = None,
                       profile_root: str = None,
-                      display: str = None) -> bool:
+                      display: str = None,
+                      fresh: bool = False) -> bool:
     """
     Launch Chrome with CDP enabled.
 
@@ -363,12 +473,14 @@ def launch_chrome_cdp(port: int = 9222, user_data_dir: str = None,
         user_data_dir: Chrome user data directory
         profile_directory: --profile-directory value inside user_data_dir
                            (e.g. 'Profile 3')
-        clone_from_profile: If set, clone this profile from profile_root into
-                            a disposable user-data-dir first, so the live
-                            profile is never touched.
+        clone_from_profile: Seed DeepDiver's home (or user_data_dir) from this
+                            profile when that folder does not exist yet. An
+                            existing home is reused as it is, sign-in included.
         profile_root: Chrome config root for cloning
                       (default: ~/.config/google-chrome)
         display: X display to use (default: existing $DISPLAY or ':0')
+        fresh: Clone into a new temporary folder instead of DeepDiver's home
+               (a fresh clone is not signed in to Google)
 
     Returns:
         bool: True if Chrome launched and CDP answers, False otherwise
@@ -377,15 +489,14 @@ def launch_chrome_cdp(port: int = 9222, user_data_dir: str = None,
     if not chrome_cmd:
         return False
 
-    if clone_from_profile:
-        cloned = clone_chrome_profile(clone_from_profile, profile_root=profile_root,
-                                      dest_dir=user_data_dir)
-        if not cloned:
-            return False
-        user_data_dir = cloned
-        profile_directory = profile_directory or clone_from_profile
-    elif user_data_dir is None:
-        user_data_dir = os.path.expanduser('~/.chrome-deepdiver')
+    resolved = resolve_launch_dir(user_data_dir, clone_from_profile,
+                                  profile_root=profile_root, fresh=fresh)
+    if not resolved:
+        return False
+    user_data_dir = resolved
+    if clone_from_profile and not profile_directory and \
+            os.path.isdir(os.path.join(user_data_dir, clone_from_profile)):
+        profile_directory = clone_from_profile
 
     env = os.environ.copy()
     env.setdefault('DISPLAY', display or ':0')
@@ -3575,7 +3686,7 @@ class NotebookLMAutomator:
             # A signed-out profile lands on accounts.google.com with the
             # notebook URL in its continue= parameter; a substring test on
             # '/notebook/' accepted that page (2026-10-07).
-            if _is_google_signin_url(current_url):
+            if _is_signed_out_url(current_url):
                 self.logger.error("❌ Not signed in to Google in this Chrome profile: "
                                   "sign in at the Chrome window, then retry")
                 return False

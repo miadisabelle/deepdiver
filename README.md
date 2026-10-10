@@ -318,8 +318,13 @@ written back into the session tracker.
 # Launch Chrome with CDP (SSH/tmux-safe: passes DISPLAY/XAUTHORITY)
 deepdiver chrome launch
 
-# Reuse an authenticated profile WITHOUT touching the live one
+# DeepDiver's own Chrome home (~/.chrome-deepdiver): sign in to Google once,
+# every later launch reuses it. --clone-profile seeds the home the first time.
 deepdiver chrome launch --clone-profile "Profile 3"
+deepdiver chrome status          # exit 0 signed in, 2 not signed in, 1 no Chrome
+
+# A sign-in made in a temporary clone: close that Chrome, then keep its folder
+deepdiver chrome adopt /tmp/deepdiver-chrome-XXXX
 ```
 
 ### Agent Skills

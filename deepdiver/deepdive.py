@@ -28,6 +28,9 @@ from .notebooklm_automator import (
     check_chrome_cdp_running,
     get_cdp_version_info,
     launch_chrome_cdp,
+    check_signed_in,
+    adopt_user_data_dir,
+    DEFAULT_USER_DATA_DIR,
     get_cdp_url,
     find_config_file
 )
@@ -1522,39 +1525,91 @@ def chrome():
 
 @chrome.command(name='launch')
 @click.option('--port', default=9222, help='CDP port (default: 9222)')
-@click.option('--user-data-dir', default=None, help='Chrome user data directory')
+@click.option('--user-data-dir', default=None,
+              help='Chrome user data directory (default: DeepDiver\'s home, ~/.chrome-deepdiver)')
 @click.option('--clone-profile', default=None,
-              help='Clone this authenticated profile (e.g. "Profile 3") into a '
-                   'disposable user-data-dir so the live profile is never touched')
+              help='Seed the user data directory from this profile (e.g. "Profile 2") '
+                   'when it does not exist yet; an existing one is reused, sign-in included')
+@click.option('--fresh', is_flag=True, default=False,
+              help='Clone into a new temporary folder instead (not signed in to Google)')
 @click.option('--profile-root', default=None,
               help='Chrome config root for cloning (default: ~/.config/google-chrome)')
 @click.option('--display', default=None,
               help='X display (default: $DISPLAY or :0 — needed from SSH/tmux)')
 def chrome_launch(port: int, user_data_dir: Optional[str], clone_profile: Optional[str],
-                  profile_root: Optional[str], display: Optional[str]):
+                  fresh: bool, profile_root: Optional[str], display: Optional[str]):
     """Launch Chrome with CDP enabled (SSH/tmux-safe).
 
-    Passes DISPLAY/XAUTHORITY through so launching from a non-interactive
-    SSH or tmux context works, binds the debug port to 127.0.0.1, and can
-    clone an authenticated profile instead of touching the live one.
+    Uses DeepDiver's own Chrome home (~/.chrome-deepdiver), so a person signs in
+    to Google once and every later launch reuses that sign-in. Passes
+    DISPLAY/XAUTHORITY through so launching from SSH or tmux works, and binds
+    the debug port to 127.0.0.1.
 
     Examples:
         deepdiver chrome launch
-        deepdiver chrome launch --clone-profile "Profile 3"
-        deepdiver chrome launch --port 9223 --display :0
+        deepdiver chrome launch --clone-profile "Profile 2"   # seeds the home once
+        deepdiver chrome launch --clone-profile "Profile 2" --fresh
     """
     console.print(f"🚀 Launching Chrome with CDP on port {port}...", style="blue")
-    if clone_profile:
-        console.print(f"👤 Cloning profile: {clone_profile}", style="cyan")
+    home = os.path.expanduser(user_data_dir or DEFAULT_USER_DATA_DIR)
+    if clone_profile and fresh:
+        console.print(f"👤 Cloning profile into a temporary folder: {clone_profile}", style="cyan")
+    elif os.path.isfile(os.path.join(home, 'Local State')):
+        console.print(f"🏠 Reusing {home}", style="cyan")
+    elif clone_profile:
+        console.print(f"👤 Seeding {home} from profile: {clone_profile}", style="cyan")
 
-    if launch_chrome_cdp(port=port, user_data_dir=user_data_dir,
-                         clone_from_profile=clone_profile,
-                         profile_root=profile_root, display=display):
-        console.print(f"✅ Chrome launched — CDP live at http://127.0.0.1:{port}", style="green")
-        console.print("💡 Log in to NotebookLM in the Chrome window, then: deepdiver test", style="yellow")
-    else:
+    if not launch_chrome_cdp(port=port, user_data_dir=user_data_dir,
+                             clone_from_profile=clone_profile,
+                             profile_root=profile_root, display=display, fresh=fresh):
         console.print("❌ Chrome launch failed or CDP did not come up", style="red")
         console.print("💡 From SSH/tmux, X env is required: try --display :0", style="yellow")
+        sys.exit(1)
+    console.print(f"✅ Chrome launched — CDP live at http://127.0.0.1:{port}", style="green")
+    signed_in = check_signed_in(f'http://127.0.0.1:{port}')
+    if signed_in:
+        console.print("✅ Signed in to Gemini Notebook", style="green")
+    else:
+        console.print("⚠️  Not signed in to Gemini Notebook: sign in once in this Chrome window. "
+                      "The sign-in stays in this folder for later launches.", style="yellow")
+        sys.exit(2)
+
+
+@chrome.command(name='status')
+@click.option('--port', default=9222, help='CDP port (default: 9222)')
+def chrome_status(port: int):
+    """Is Chrome up on the CDP port, and is it signed in to Gemini Notebook?
+
+    Exit 0 signed in, 2 not signed in, 1 no Chrome on the port.
+    """
+    cdp_url = f'http://127.0.0.1:{port}'
+    if not check_chrome_cdp_running(cdp_url):
+        console.print(f"❌ No Chrome answers on {cdp_url}", style="red")
+        sys.exit(1)
+    if check_signed_in(cdp_url):
+        console.print(f"✅ Chrome on {cdp_url} is signed in to Gemini Notebook", style="green")
+        return
+    console.print(f"⚠️  Chrome on {cdp_url} is not signed in to Gemini Notebook", style="yellow")
+    sys.exit(2)
+
+
+@chrome.command(name='adopt')
+@click.argument('source_dir')
+@click.option('--user-data-dir', default=None,
+              help='Destination (default: DeepDiver\'s home, ~/.chrome-deepdiver)')
+def chrome_adopt(source_dir: str, user_data_dir: Optional[str]):
+    """Move a Chrome folder that is already signed in into DeepDiver's home.
+
+    For a sign-in made in a temporary clone: close that Chrome first, then
+    adopt its folder so later launches reuse the sign-in. Refuses when Chrome
+    still holds the folder or the destination exists.
+    """
+    dest = adopt_user_data_dir(source_dir, user_data_dir)
+    if not dest:
+        console.print("❌ Not adopted: the source must be a closed Chrome user-data-dir "
+                      "and the destination must not exist", style="red")
+        sys.exit(1)
+    console.print(f"✅ {source_dir} is now {dest}", style="green")
 
 
 # ═══════════════════════════════════════════════════════════════

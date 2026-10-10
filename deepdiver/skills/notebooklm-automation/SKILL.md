@@ -21,10 +21,13 @@ operating manual an agent needs to run it well.
    ```bash
    google-chrome --remote-debugging-port=9222 --user-data-dir=~/.chrome-deepdiver &
    ```
-   Or let DeepDiver do it (supports cloning an authenticated profile so the
-   live profile is never touched):
+   Or let DeepDiver do it. It uses its own home, `~/.chrome-deepdiver`: sign
+   in to Google there once and every later launch reuses it. `--clone-profile`
+   seeds the home the first time; `--fresh` makes a throwaway clone, which is
+   not signed in.
    ```bash
    deepdiver chrome launch --clone-profile "Profile 3"
+   deepdiver chrome status   # exit 0 signed in, 2 not signed in, 1 no Chrome
    ```
 2. Verify real CDP health (`deepdiver status` probes `/json/version` — trust
    its CDP line, not just "config loaded"):

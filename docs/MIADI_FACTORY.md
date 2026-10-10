@@ -29,7 +29,8 @@ DeepDiver is an instrument of **T6 · Production** (after an episode). Its human
 
 | step | command |
 |---|---|
-| start Chrome with a signed-in profile | `deepdiver chrome launch --clone-profile "<Profile N>"` |
+| start Chrome from DeepDiver's home, signed in once | `deepdiver chrome launch` (`--clone-profile "<Profile N>"` seeds the home the first time) |
+| is Chrome up and signed in | `deepdiver chrome status` (exit 0 signed in, 2 not, 1 no Chrome) |
 | new notebook with a first source | `deepdiver notebook create --source <review.md>` |
 | add a source | `deepdiver notebook add-source <id> <url-or-file>` |
 | add only missing files | `deepdiver notebook resume <id> -s a.md -s b.md` |
@@ -97,7 +98,7 @@ A search for an "Add" button also matched the header's "Create notebook" button,
 ## Installing it in the factory
 
 - Python 3.8 or later, with `playwright`.
-- Google Chrome on a host with a display, and a Chrome profile signed in to the Google account that owns the notebooks. `deepdiver chrome launch --clone-profile` copies that profile so the live one is never touched.
+- Google Chrome on a host with a display, and a Chrome profile signed in to the Google account that owns the notebooks. DeepDiver keeps its own Chrome home, `~/.chrome-deepdiver`: a person signs in to Google there once, and every launch reuses it. A clone made fresh on each launch is not signed in, because Google does not carry the session into the copy (2026-10-09).
 - `ffprobe`, for the media data in the manifest.
 - Configuration in `~/.config/deepdiver/config.yaml` (`deepdiver init`).
 - The agent skill: `deepdiver skills install --agent claude`.
