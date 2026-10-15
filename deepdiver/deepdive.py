@@ -29,6 +29,7 @@ from .notebooklm_automator import (
     get_cdp_version_info,
     launch_chrome_cdp,
     check_signed_in,
+    describe_attach_timeout,
     adopt_user_data_dir,
     DEFAULT_USER_DATA_DIR,
     get_cdp_url,
@@ -1610,6 +1611,9 @@ def chrome_launch(port: int, user_data_dir: Optional[str], clone_profile: Option
         sys.exit(1)
     console.print(f"✅ Chrome launched — CDP live at http://127.0.0.1:{port}", style="green")
     signed_in = check_signed_in(f'http://127.0.0.1:{port}')
+    if signed_in is None:
+        console.print(f"❌ {describe_attach_timeout(f'http://127.0.0.1:{port}')}", style="red")
+        sys.exit(3)
     if signed_in:
         console.print("✅ Signed in to Gemini Notebook", style="green")
     else:
@@ -1623,15 +1627,20 @@ def chrome_launch(port: int, user_data_dir: Optional[str], clone_profile: Option
 def chrome_status(port: int):
     """Is Chrome up on the CDP port, and is it signed in to Gemini Notebook?
 
-    Exit 0 signed in, 2 not signed in, 1 no Chrome on the port.
+    Exit 0 signed in, 2 not signed in, 1 no Chrome on the port, 3 Chrome
+    answers but DeepDiver cannot attach (a tab hangs).
     """
     cdp_url = f'http://127.0.0.1:{port}'
     if not check_chrome_cdp_running(cdp_url):
         console.print(f"❌ No Chrome answers on {cdp_url}", style="red")
         sys.exit(1)
-    if check_signed_in(cdp_url):
+    signed_in = check_signed_in(cdp_url)
+    if signed_in:
         console.print(f"✅ Chrome on {cdp_url} is signed in to Gemini Notebook", style="green")
         return
+    if signed_in is None:
+        console.print(f"❌ {describe_attach_timeout(cdp_url)}", style="red")
+        sys.exit(3)
     console.print(f"⚠️  Chrome on {cdp_url} is not signed in to Gemini Notebook", style="yellow")
     sys.exit(2)
 

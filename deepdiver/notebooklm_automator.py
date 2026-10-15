@@ -87,6 +87,24 @@ def _is_google_signin_url(url: Optional[str]) -> bool:
 
 BLANK_TAB_URLS = ('about:blank', 'chrome://newtab/', 'chrome://new-tab-page/')
 
+# Playwright attaches to every tab when it connects over CDP, and one tab whose
+# page stopped answering stalls that forever (2026-10-15: an AI Studio app tab
+# in DeepDiver's Chrome). Give up after this long and say why.
+CDP_ATTACH_TIMEOUT_MS = 30000
+
+
+def describe_attach_timeout(cdp_url: str) -> str:
+    """What to tell a person when Playwright cannot attach: the open tabs, since one of them hangs."""
+    try:
+        tabs = requests.get(f"{cdp_url.rstrip('/')}/json", timeout=3).json()
+        urls = [t.get('url', '') for t in tabs if t.get('type') == 'page']
+    except Exception:
+        urls = []
+    listed = '; '.join(u[:80] for u in urls) or 'the tab list did not answer either'
+    return (f"Chrome did not let DeepDiver attach within {CDP_ATTACH_TIMEOUT_MS // 1000} s. "
+            f"A tab whose page stopped answering blocks it. Open tabs: {listed}. "
+            "Reload or close the tab that hangs (it may be a person's own work), then retry.")
+
 
 def pick_deepdiver_page(pages: List[Any]) -> Optional[Any]:
     """The tab DeepDiver may drive: one already on Gemini Notebook, else a blank one.
@@ -441,7 +459,7 @@ def resolve_launch_dir(user_data_dir: str = None, clone_from_profile: str = None
 
 async def _probe_signed_in(cdp_url: str) -> Optional[bool]:
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(cdp_url)
+        browser = await p.chromium.connect_over_cdp(cdp_url, timeout=CDP_ATTACH_TIMEOUT_MS)
         try:
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
             page = await context.new_page()
@@ -659,7 +677,14 @@ class NotebookLMAutomator:
             self.playwright = await async_playwright().start()
 
             # Connect to existing browser
-            self.browser = await self.playwright.chromium.connect_over_cdp(self.cdp_url)
+            try:
+                self.browser = await self.playwright.chromium.connect_over_cdp(
+                    self.cdp_url, timeout=CDP_ATTACH_TIMEOUT_MS)
+            except Exception as e:
+                if 'Timeout' in type(e).__name__ or 'Timeout' in str(e):
+                    self.logger.error(f"❌ {describe_attach_timeout(self.cdp_url)}")
+                    return False
+                raise
             self._connected_over_cdp = True
             
             # Get the first available context
