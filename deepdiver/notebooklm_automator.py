@@ -85,6 +85,25 @@ def _is_google_signin_url(url: Optional[str]) -> bool:
         return False
 
 
+BLANK_TAB_URLS = ('about:blank', 'chrome://newtab/', 'chrome://new-tab-page/')
+
+
+def pick_deepdiver_page(pages: List[Any]) -> Optional[Any]:
+    """The tab DeepDiver may drive: one already on Gemini Notebook, else a blank one.
+
+    Never a tab on another site. The Chrome on 9222 is also a person's browser
+    (on 2026-10-15 it held AI Studio, an episode room and a notebook), and
+    taking the first tab would navigate their page away.
+    """
+    for page in pages:
+        if _is_notebooklm_host(getattr(page, 'url', '')):
+            return page
+    for page in pages:
+        if (getattr(page, 'url', '') or '') in BLANK_TAB_URLS:
+            return page
+    return None
+
+
 def _is_signed_out_url(url: Optional[str]) -> bool:
     """True for the pages a signed-out profile lands on.
 
@@ -652,10 +671,15 @@ class NotebookLMAutomator:
                 self.context = await self.browser.new_context()
                 self._owns_context = True
             
-            # Get the first available page or create new one
+            # Drive a notebook tab or a blank one; never take over a tab on
+            # another site. A tab opened here stays for the next command.
             pages = self.context.pages
-            if pages:
-                self.page = pages[0]
+            page = pick_deepdiver_page(pages)
+            if page:
+                self.page = page
+                self._owns_page = False
+            elif pages:
+                self.page = await self.context.new_page()
                 self._owns_page = False
             else:
                 self.page = await self.context.new_page()
