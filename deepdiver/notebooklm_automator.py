@@ -122,6 +122,20 @@ def pick_deepdiver_page(pages: List[Any]) -> Optional[Any]:
     return None
 
 
+_DAILY_LIMIT_RE = re.compile(r"You have reached your daily ([A-Za-z][A-Za-z ]{0,40}?) limit", re.I)
+
+
+def daily_limit_message(page_text: Optional[str]) -> Optional[str]:
+    """Gemini Notebook's own words when a family's daily quota is spent, or None.
+
+    Seen 2026-10-15 on an Infographic tile: no customization dialog opens, the
+    page says "You have reached your daily Infographic limit.", and nothing is
+    generated.
+    """
+    m = _DAILY_LIMIT_RE.search(page_text or "")
+    return m.group(0) if m else None
+
+
 def _is_signed_out_url(url: Optional[str]) -> bool:
     """True for the pages a signed-out profile lands on.
 
@@ -2516,6 +2530,11 @@ class NotebookLMAutomator:
             # appearing during polling.
             elapsed = int(time.time() - start_time)
             detected = await self.detect_completed_artifact(artifact_type)
+            # Only a card that was not there before counts: on 2026-10-15 an
+            # Infographic that never started "recovered" the notebook's video.
+            if detected and await self._count_completed_cards(artifact_type) <= baseline_count:
+                self.logger.error(f"❌ Timeout after {elapsed}s and no new {artifact_type} card appeared")
+                detected = None
             if detected:
                 result = await self._resolve_new_artifact(
                     detected, artifact_type, baseline_count, baseline_keys
@@ -2938,6 +2957,13 @@ class NotebookLMAutomator:
         else:
             # Some tiles start generation immediately without a dialog;
             # continue to monitoring rather than treating this as failure.
+            try:
+                limit = daily_limit_message(await self.page.inner_text('body'))
+            except Exception:
+                limit = None
+            if limit:
+                self.logger.error(f"❌ Gemini Notebook says: {limit}. Nothing was generated; try again tomorrow.")
+                return False
             self.logger.info("ℹ️ No customization dialog appeared — assuming generation started from tile")
         return True
 

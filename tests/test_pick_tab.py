@@ -48,3 +48,12 @@ def test_attach_timeout_when_even_the_tab_list_is_silent(monkeypatch):
         raise TimeoutError
     monkeypatch.setattr(na.requests, 'get', silent)
     assert 'the tab list did not answer either' in na.describe_attach_timeout('http://127.0.0.1:9222')
+
+
+def test_daily_limit_is_read_from_the_page():
+    from deepdiver.notebooklm_automator import daily_limit_message
+    page = "Studio\nInfographic\nYou have reached your daily Infographic limit. Learn more.\n"
+    assert daily_limit_message(page) == "You have reached your daily Infographic limit"
+    assert daily_limit_message("You have reached your daily Video Overview limit.") == "You have reached your daily Video Overview limit"
+    assert daily_limit_message("Limitation noted: End-to-end hosted routes are not yet built") is None
+    assert daily_limit_message(None) is None
