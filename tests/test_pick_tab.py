@@ -57,3 +57,24 @@ def test_daily_limit_is_read_from_the_page():
     assert daily_limit_message("You have reached your daily Video Overview limit.") == "You have reached your daily Video Overview limit"
     assert daily_limit_message("Limitation noted: End-to-end hosted routes are not yet built") is None
     assert daily_limit_message(None) is None
+
+
+def test_wake_background_tabs_activates_each_page_then_the_first_again(monkeypatch):
+    from deepdiver import notebooklm_automator as na
+    calls = []
+
+    class Answer:
+        def __init__(self, data=None):
+            self._data = data
+
+        def json(self):
+            return self._data
+
+    def get(url, timeout=None):
+        calls.append(url)
+        if url.endswith('/json'):
+            return Answer([{'type': 'page', 'id': 'A'}, {'type': 'iframe', 'id': 'X'}, {'type': 'page', 'id': 'B'}])
+        return Answer()
+    monkeypatch.setattr(na.requests, 'get', get)
+    assert na.wake_background_tabs('http://127.0.0.1:9222/', pause=0) == 2
+    assert [c.rsplit('/', 1)[1] for c in calls[1:]] == ['A', 'B', 'A']

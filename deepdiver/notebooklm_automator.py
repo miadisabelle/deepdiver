@@ -93,6 +93,26 @@ BLANK_TAB_URLS = ('about:blank', 'chrome://newtab/', 'chrome://new-tab-page/')
 CDP_ATTACH_TIMEOUT_MS = 30000
 
 
+def wake_background_tabs(cdp_url: str, pause: float = 1.0) -> int:
+    """Bring each tab to the front once, then the first one again, through the
+    DevTools HTTP endpoint (/json/activate). Chrome freezes background tabs, and
+    a frozen tab never answers Playwright's attach (2026-10-16: an Author's Desk
+    tab and a New Tab, both woken this way). Returns how many tabs it touched.
+    """
+    base = cdp_url.rstrip('/')
+    try:
+        pages = [t for t in requests.get(f"{base}/json", timeout=3).json() if t.get('type') == 'page']
+    except Exception:
+        return 0
+    for tab in pages + pages[:1]:
+        try:
+            requests.get(f"{base}/json/activate/{tab['id']}", timeout=3)
+        except Exception:
+            pass
+        time.sleep(pause)
+    return len(pages)
+
+
 def describe_attach_timeout(cdp_url: str) -> str:
     """What to tell a person when Playwright cannot attach: the open tabs, since one of them hangs."""
     try:
@@ -569,6 +589,11 @@ def launch_chrome_cdp(port: int = 9222, user_data_dir: str = None,
     # these flags Chrome opens its Terms of Service window and the DevTools
     # server never starts.
     cmd.append('--no-first-run')
+    # Keep background tabs awake: a frozen tab stops Playwright from attaching
+    # (2026-10-16). These are the flags Playwright itself passes when it launches.
+    cmd.append('--disable-renderer-backgrounding')
+    cmd.append('--disable-background-timer-throttling')
+    cmd.append('--disable-backgrounding-occluded-windows')
     cmd.append('--no-default-browser-check')
     cmd.append('--new-window')
     cmd.append('about:blank')
@@ -695,10 +720,19 @@ class NotebookLMAutomator:
                 self.browser = await self.playwright.chromium.connect_over_cdp(
                     self.cdp_url, timeout=CDP_ATTACH_TIMEOUT_MS)
             except Exception as e:
-                if 'Timeout' in type(e).__name__ or 'Timeout' in str(e):
-                    self.logger.error(f"❌ {describe_attach_timeout(self.cdp_url)}")
-                    return False
-                raise
+                if not ('Timeout' in type(e).__name__ or 'Timeout' in str(e)):
+                    raise
+                # A frozen background tab is the usual cause: wake every tab once, try once more.
+                woke = wake_background_tabs(self.cdp_url)
+                self.logger.warning(f"⚠️ Attach timed out; brought {woke} tab(s) forward once to wake frozen ones, retrying")
+                try:
+                    self.browser = await self.playwright.chromium.connect_over_cdp(
+                        self.cdp_url, timeout=CDP_ATTACH_TIMEOUT_MS)
+                except Exception as e2:
+                    if 'Timeout' in type(e2).__name__ or 'Timeout' in str(e2):
+                        self.logger.error(f"❌ {describe_attach_timeout(self.cdp_url)}")
+                        return False
+                    raise
             self._connected_over_cdp = True
             
             # Get the first available context
