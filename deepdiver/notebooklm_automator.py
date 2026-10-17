@@ -85,6 +85,34 @@ def _is_google_signin_url(url: Optional[str]) -> bool:
         return False
 
 
+def source_url_key(url: Optional[str]) -> str:
+    """One key for the forms a source URL takes. Gemini Notebook titles a
+    YouTube source it could not import with https://www.youtube.com/watch?v=<id>
+    even when https://youtu.be/<id> was given (2026-10-15), so both map to yt:<id>."""
+    from urllib.parse import urlparse, parse_qs
+    u = (url or '').strip()
+    try:
+        parsed = urlparse(u)
+        host = (parsed.hostname or '').lower()
+        if host.startswith('www.'):
+            host = host[4:]
+        if host.startswith('m.'):
+            host = host[2:]
+        if host == 'youtu.be' and parsed.path.strip('/'):
+            return 'yt:' + parsed.path.strip('/').split('/')[0]
+        if host in ('youtube.com', 'music.youtube.com'):
+            vid = parse_qs(parsed.query).get('v', [''])[0]
+            if vid:
+                return 'yt:' + vid
+            if parsed.path.startswith(('/shorts/', '/live/')):
+                return 'yt:' + parsed.path.split('/')[2]
+        if host:
+            return f"{host}{parsed.path.rstrip('/')}" + (f"?{parsed.query}" if parsed.query else '')
+    except Exception:
+        pass
+    return u.rstrip('/')
+
+
 BLANK_TAB_URLS = ('about:blank', 'chrome://newtab/', 'chrome://new-tab-page/')
 
 # Playwright attaches to every tab when it connects over CDP, and one tab whose
@@ -1816,10 +1844,21 @@ class NotebookLMAutomator:
                 return None
             # A URL that cannot be imported still gets a row, marked as an
             # error, titled with the bare URL (observed 2026-10-06 for videos
-            # uploaded the same day: "Transcript not available").
-            await self.page.wait_for_timeout(3000)
-            given = set(url.split())
-            self.last_source_errors = [e for e in await self._source_errors() if e['title'] in given]
+            # uploaded the same day: "Transcript not available"). A video can
+            # take a minute to fail (2026-10-15: 3 s was too early, and the
+            # row's title was the youtube.com/watch form of a youtu.be URL), so
+            # wait until no given URL is still a bare, unprocessed row.
+            given = {source_url_key(u): u for u in url.split()}
+            errors = []
+            for _ in range(18):
+                await self.page.wait_for_timeout(5000)
+                errors = [dict(e, title=given[source_url_key(e['title'])])
+                          for e in await self._source_errors() if source_url_key(e['title']) in given]
+                failed = {source_url_key(e['title']) for e in errors}
+                titles = {source_url_key(x) for x in await self.page.locator('.source-title').all_inner_texts()}
+                if not any(k in titles and k not in failed for k in given):
+                    break
+            self.last_source_errors = errors
             for error in self.last_source_errors:
                 self.logger.error(f"❌ Not imported: {error['title']} — {error['reason']}")
             imported = added - len(self.last_source_errors)

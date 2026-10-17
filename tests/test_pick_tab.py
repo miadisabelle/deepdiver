@@ -78,3 +78,12 @@ def test_wake_background_tabs_activates_each_page_then_the_first_again(monkeypat
     monkeypatch.setattr(na.requests, 'get', get)
     assert na.wake_background_tabs('http://127.0.0.1:9222/', pause=0) == 2
     assert [c.rsplit('/', 1)[1] for c in calls[1:]] == ['A', 'B', 'A']
+
+
+def test_source_url_key_matches_the_forms_gemini_notebook_uses():
+    from deepdiver.notebooklm_automator import source_url_key as k
+    assert k('https://youtu.be/gloSM0SIgPI') == k('https://www.youtube.com/watch?v=gloSM0SIgPI') == 'yt:gloSM0SIgPI'
+    assert k('https://m.youtube.com/watch?v=abc&t=10') == 'yt:abc'
+    assert k('https://www.youtube.com/shorts/xyz') == 'yt:xyz'
+    assert k('https://example.com/a/') == k('https://example.com/a')
+    assert k('https://example.com/a') != k('https://example.com/b')
