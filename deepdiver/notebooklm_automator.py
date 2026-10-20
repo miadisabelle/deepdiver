@@ -1129,22 +1129,38 @@ class NotebookLMAutomator:
         await self.page.wait_for_timeout(2000)
         return True
 
-    async def close_artifact_viewer(self) -> None:
-        """Close whatever artifact viewer or player is open in the Studio panel."""
-        for selector in (
-            'button[aria-label="Close report viewer"]',
-            'button[aria-label^="Close "][aria-label$="overview"]',
-            'artifact-viewer button[aria-label="Close"]',
-        ):
+    # Each Studio family's viewer has its own close button. The infographic
+    # viewer says "Close infographic" (2026-10-20, notebook 5a00e2d8): left
+    # open, it covers the Studio panel, so later generations, the report tile
+    # and `studio list` find nothing.
+    ARTIFACT_VIEWER_CLOSE_SELECTORS = (
+        'button[aria-label="Close report viewer"]',
+        'button[aria-label="Close infographic"]',
+        'button[aria-label="Close slide deck"]',
+        'button[aria-label="Close mind map"]',
+        'button[aria-label="Close data table"]',
+        'button[aria-label^="Close "][aria-label$="overview"]',
+        'artifact-viewer button[aria-label="Close"]',
+    )
+
+    async def close_open_artifact_viewer(self) -> bool:
+        """Close an artifact viewer if one is open; press nothing otherwise."""
+        for selector in self.ARTIFACT_VIEWER_CLOSE_SELECTORS:
             button = self.page.locator(selector)
             if await button.count() > 0:
                 try:
                     await button.first.click(timeout=3000)
                     await self.page.wait_for_timeout(800)
-                    return
+                    self.logger.info(f"🗙 Closed an open artifact viewer: {selector}")
+                    return True
                 except Exception:
                     continue
-        await self.page.keyboard.press('Escape')
+        return False
+
+    async def close_artifact_viewer(self) -> None:
+        """Close whatever artifact viewer or player is open in the Studio panel."""
+        if not await self.close_open_artifact_viewer():
+            await self.page.keyboard.press('Escape')
 
     async def save_report_card(self, card, output_stem: str, title: str = None):
         """
@@ -3827,6 +3843,12 @@ class NotebookLMAutomator:
 
             # Clear the welcome/rebrand modal before any interaction.
             await self.dismiss_rebrand_modal()
+            # A viewer left open by an earlier command survives a navigation
+            # to the same notebook and hides the Studio panel.
+            try:
+                await self.close_open_artifact_viewer()
+            except Exception as e:
+                self.logger.warning(f"⚠️ Could not check for an open artifact viewer: {e}")
 
             # Verify notebook loaded successfully
             # First check if URL contains /notebook/ - most reliable indicator
