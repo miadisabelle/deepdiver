@@ -113,6 +113,21 @@ def source_url_key(url: Optional[str]) -> str:
     return u.rstrip('/')
 
 
+def match_source_titles(titles: List[str], wanted: str) -> List[int]:
+    """Positions of the source rows a removal names: the exact title first, then
+    the same URL in another form (a YouTube source is titled with its watch URL
+    whatever form was given). Several matches are returned as they are, so the
+    caller can refuse to guess."""
+    want = (wanted or '').strip()
+    exact = [i for i, t in enumerate(titles) if (t or '').strip() == want]
+    if exact:
+        return exact
+    key = source_url_key(want)
+    if want.startswith(('http://', 'https://')):
+        return [i for i, t in enumerate(titles) if source_url_key((t or '').strip()) == key]
+    return []
+
+
 BLANK_TAB_URLS = ('about:blank', 'chrome://newtab/', 'chrome://new-tab-page/')
 
 # Playwright attaches to every tab when it connects over CDP, and one tab whose
@@ -1889,6 +1904,69 @@ class NotebookLMAutomator:
         except Exception as e:
             self.logger.error(f"❌ Failed to add URL source: {e}")
             return None
+
+    async def list_source_titles(self) -> List[str]:
+        """The titles of the Sources panel's rows, in order."""
+        titles = []
+        rows = self.page.locator('.single-source-container')
+        for i in range(await rows.count()):
+            try:
+                titles.append((await rows.nth(i).locator('.source-title').first.inner_text()).strip())
+            except Exception:
+                titles.append('')
+        return titles
+
+    async def remove_source(self, title: str, notebook_id: str = None) -> Dict[str, Any]:
+        """
+        Remove one source from a notebook by its title in the Sources panel.
+
+        A revised source replaces its old copy this way (screenwalk 2610221013,
+        07:22: remove the outdated sources, add the revised ones, regenerate).
+        Opens the row's More menu, chooses Remove, confirms, and succeeds only
+        when the row is gone. Refuses a title that matches several rows.
+
+        Returns {'removed': bool, 'title': str, 'reason': str}.
+        """
+        if not self.page:
+            return {'removed': False, 'title': title, 'reason': 'no browser page'}
+        if notebook_id and not await self.navigate_to_notebook(notebook_id=notebook_id):
+            return {'removed': False, 'title': title, 'reason': f'could not open notebook {notebook_id}'}
+
+        titles = await self.list_source_titles()
+        matches = match_source_titles(titles, title)
+        if not matches:
+            return {'removed': False, 'title': title, 'reason': 'no source has this title'}
+        if len(matches) > 1:
+            return {'removed': False, 'title': title,
+                    'reason': f'{len(matches)} sources have this title; nothing removed'}
+        found = titles[matches[0]]
+        row = self.page.locator('.single-source-container').nth(matches[0])
+
+        try:
+            more = row.locator('button[aria-label="More"], button:has(mat-icon:text-is("more_vert"))').first
+            await more.click(timeout=5000)
+            item = self.page.get_by_role('menuitem', name=re.compile(r'(remove|delete)', re.I)).first
+            await item.click(timeout=5000)
+            dialog = self.page.locator('mat-dialog-container, [role="dialog"]').last
+            confirm = dialog.get_by_role('button', name=re.compile(r'^\s*(delete|remove|confirm)', re.I))
+            try:
+                if await confirm.count() > 0:
+                    await confirm.first.click(timeout=5000)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                await self.page.keyboard.press('Escape')
+            except Exception:
+                pass
+            return {'removed': False, 'title': found, 'reason': f'the remove control was not found: {e}'}
+
+        for _ in range(20):
+            await self.page.wait_for_timeout(750)
+            if found not in await self.list_source_titles():
+                self.logger.info(f"🗑️ Removed source: {found}")
+                return {'removed': True, 'title': found, 'reason': ''}
+        return {'removed': False, 'title': found, 'reason': 'the row is still there after confirming'}
 
     async def _count_sources(self) -> int:
         """Source rows in the Sources panel."""

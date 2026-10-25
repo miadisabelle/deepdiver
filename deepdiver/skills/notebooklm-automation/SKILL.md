@@ -43,6 +43,7 @@ deepdiver test                                  # connect → navigate → auth 
 deepdiver notebook create --source <url|file>   # new notebook (+ first source)
 deepdiver notebook open <id>                    # navigate to existing notebook
 deepdiver notebook resume <id> -s a.md -s b.md  # upload ONLY missing sources
+deepdiver notebook remove-source <id> a.md      # by title or tracked source id; a title several rows share is refused
 deepdiver notebook add-source <id> <url|file>
 deepdiver notebook share <email> --role viewer
 deepdiver studio audio --format deep_dive --language French --length long \

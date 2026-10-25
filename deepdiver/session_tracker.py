@@ -507,6 +507,24 @@ class SessionTracker:
             self.logger.error(f"❌ Failed to add source to notebook: {e}")
             return False
 
+    def find_source(self, notebook_id: str, ref: str) -> Optional[Dict[str, Any]]:
+        """The tracked source a remove names: by its source_id, else by its filename."""
+        for source in self.list_notebook_sources(notebook_id):
+            if ref in (source.get('source_id'), source.get('filename'), source.get('path')):
+                return source
+        return None
+
+    def remove_source_from_notebook(self, notebook_id: str, ref: str) -> bool:
+        """Forget a removed source: drop the tracked record with this source_id or filename."""
+        notebook = self.get_notebook_by_id(notebook_id)
+        if not notebook:
+            return False
+        kept = [s for s in notebook.get('sources', [])
+                if ref not in (s.get('source_id'), s.get('filename'), s.get('path'))]
+        if len(kept) == len(notebook.get('sources', [])):
+            return False
+        return self.update_notebook(notebook_id, {'sources': kept})
+
     def list_notebook_sources(self, notebook_id: str) -> List[Dict[str, Any]]:
         """
         List all sources for a notebook.

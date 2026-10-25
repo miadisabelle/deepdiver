@@ -34,6 +34,7 @@ DeepDiver is an instrument of **T6 · Production** (after an episode). Its human
 | new notebook with a first source | `deepdiver notebook create --source <review.md>` |
 | add a source | `deepdiver notebook add-source <id> <url-or-file>` |
 | add only missing files | `deepdiver notebook resume <id> -s a.md -s b.md` |
+| replace a revised source | `deepdiver notebook remove-source <id> <title or source id>`, then `add-source` the revised file (refuses a title several sources share) |
 | ask the notebook a question | `deepdiver notebook ask <id> "<question>" -o asked.md` |
 | generate an artifact | `deepdiver studio generate <family> -n <id> [--focus "..."]` |
 | generate a report | `deepdiver studio report [--format document] [--template "..."] [--prompt "..."] -n <id>` |

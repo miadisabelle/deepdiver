@@ -895,6 +895,56 @@ def notebook_add_source(notebook_id: str, sources: tuple, name: Optional[str], c
         sys.exit(1)
 
 
+@notebook.command(name='remove-source')
+@click.argument('notebook_id')
+@click.argument('sources', nargs=-1, required=True)
+@cdp_url_option
+@click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
+              help='Path to configuration file')
+def notebook_remove_source(notebook_id: str, sources: tuple, cdp_url: str, config: str):
+    """Remove sources from a notebook, by title or by the source id DeepDiver recorded.
+
+    A source is named by its title as the Sources panel shows it (a file's name,
+    a URL), or by the source_id the session tracker gave it when DeepDiver added
+    it. A title that matches several sources is refused and nothing is removed.
+    Exits 1 when any named source was not removed.
+
+    Example (a revised source replaces its old copy):
+        deepdiver notebook remove-source abc-123 spec-v1.md
+        deepdiver notebook add-source abc-123 ./spec-v2.md
+    """
+    from .notebooklm_automator import NotebookLMAutomator
+    from .session_tracker import SessionTracker
+
+    async def run_remove():
+        tracker = SessionTracker()
+        tracker._load_current_session()
+        automator = NotebookLMAutomator(config, cdp_url_override=cdp_url)
+        if not await automator.connect_to_browser():
+            console.print("❌ Failed to connect to browser", style="red")
+            return False
+        failed = []
+        for ref in sources:
+            tracked = tracker.find_source(notebook_id, ref) if tracker.current_session else None
+            title = (tracked or {}).get('filename') or ref
+            if tracked and tracked.get('type') == 'url':
+                title = tracked.get('path') or title
+            result = await automator.remove_source(title, notebook_id=notebook_id)
+            if result['removed']:
+                console.print(f"🗑️ Removed: {result['title']}", style="green")
+                if tracker.current_session:
+                    tracker.remove_source_from_notebook(notebook_id, (tracked or {}).get('source_id') or ref)
+            else:
+                console.print(f"❌ Not removed: {ref}: {result['reason']}", style="red")
+                failed.append(ref)
+        console.print(f"✅ {len(sources) - len(failed)} of {len(sources)} source(s) removed",
+                      style="green" if not failed else "yellow")
+        return not failed
+
+    if not asyncio.run(run_remove()):
+        sys.exit(1)
+
+
 @notebook.command(name='ask')
 @click.argument('notebook_id')
 @click.argument('question')
