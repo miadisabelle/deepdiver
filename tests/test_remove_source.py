@@ -124,3 +124,70 @@ def test_tracker_finds_by_source_id_and_forgets_the_removed_source(tmp_path, mon
     assert tracker.remove_source_from_notebook('nb1', 'a1b2c3d4')
     assert [s['filename'] for s in tracker.current_session['notebooks'][0]['sources']] == ['notes.md']
     assert not tracker.remove_source_from_notebook('nb1', 'a1b2c3d4')
+
+
+# The "Delete <title>?" dialog renders after the menu closes (Episode 297, 2026-10-25).
+LATE = PANEL.replace(
+    "document.body.appendChild(dialog);\n      dialog.querySelectorAll('button')[1]",
+    "setTimeout(() => document.body.appendChild(dialog), 1500);\n      dialog.querySelectorAll('button')[1]")
+
+# A dialog that never offers Delete: it must be closed, or its backdrop blocks the next removal.
+NO_DELETE = PANEL.replace(
+    "dialog.innerHTML = '<p>Delete this source?</p><button>Cancel</button><button>Delete</button>';",
+    "dialog.innerHTML = '<p>Something else</p><button>Cancel</button><button>Later</button>';"
+    " dialog.querySelectorAll('button')[0].addEventListener('click', () => dialog.remove());")
+
+
+async def _with(html, action):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(html)
+        automator = NotebookLMAutomator.__new__(NotebookLMAutomator)
+        automator.page = page
+        automator.logger = __import__('logging').getLogger('test')
+        try:
+            return await action(automator, page)
+        finally:
+            await browser.close()
+
+
+def test_waits_for_a_confirm_dialog_that_renders_late():
+    assert LATE != PANEL
+
+    async def act(automator, page):
+        first = await automator.remove_source('spec-v1.md')
+        second = await automator.remove_source('https://youtu.be/gloSM0SIgPI')
+        return first, second, await automator.list_source_titles()
+    first, second, left = run(_with(LATE, act))
+    assert first['removed'] and second['removed'], (first, second)
+    assert left == ['twin.md', 'twin.md']
+
+
+def test_a_dialog_without_delete_is_closed_and_reported():
+    assert NO_DELETE != PANEL
+
+    async def act(automator, page):
+        result = await automator.remove_source('spec-v1.md')
+        open_dialogs = await page.locator('mat-dialog-container').count()
+        return result, open_dialogs, await automator.list_source_titles()
+    result, open_dialogs, left = run(_with(NO_DELETE, act))
+    assert not result['removed'] and 'no Delete button' in result['reason']
+    assert open_dialogs == 0
+    assert 'spec-v1.md' in left
+
+
+def test_a_keyring_prompt_is_named_instead_of_a_hung_tab():
+    from deepdiver.notebooklm_automator import keyring_prompt_message
+    msg = keyring_prompt_message([(1, 'systemd'), (1373509, 'gcr-prompter')], ['Gemini Notebook - Google Chrome'])
+    assert 'gcr-prompter, pid 1373509' in msg and 'only a person can unlock it' in msg
+    msg2 = keyring_prompt_message([(1, 'systemd')], ['Unlock Login Keyring'])
+    assert 'Unlock Login Keyring' in msg2
+    assert keyring_prompt_message([(1, 'systemd'), (2, 'chrome')], ['New Tab - Google Chrome']) is None
+
+
+def test_attach_timeout_names_the_keyring_prompt_first(monkeypatch):
+    from deepdiver import notebooklm_automator as na
+    monkeypatch.setattr(na, 'find_keyring_prompt', lambda: 'A GNOME keyring prompt is open (gcr-prompter, pid 7).')
+    monkeypatch.setattr(na.requests, 'get', lambda *a, **k: (_ for _ in ()).throw(AssertionError('tabs not read')))
+    assert 'gcr-prompter, pid 7' in na.describe_attach_timeout('http://127.0.0.1:9222')

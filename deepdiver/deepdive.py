@@ -30,6 +30,7 @@ from .notebooklm_automator import (
     launch_chrome_cdp,
     check_signed_in,
     describe_attach_timeout,
+    find_keyring_prompt,
     adopt_user_data_dir,
     DEFAULT_USER_DATA_DIR,
     get_cdp_url,
@@ -1683,6 +1684,9 @@ def chrome_status(port: int):
     cdp_url = f'http://127.0.0.1:{port}'
     if not check_chrome_cdp_running(cdp_url):
         console.print(f"❌ No Chrome answers on {cdp_url}", style="red")
+        keyring = find_keyring_prompt()
+        if keyring:
+            console.print(f"   {keyring}", style="yellow")
         sys.exit(1)
     signed_in = check_signed_in(cdp_url)
     if signed_in:

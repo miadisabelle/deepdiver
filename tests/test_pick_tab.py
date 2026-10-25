@@ -35,6 +35,7 @@ def test_attach_timeout_names_the_open_tabs(monkeypatch):
                     {'type': 'iframe', 'url': 'https://accounts.google.com/RotateCookiesPage'},
                     {'type': 'page', 'url': 'https://notebook.google.com/notebook/3eb56742'}]
     monkeypatch.setattr(na.requests, 'get', lambda *a, **k: Answer())
+    monkeypatch.setattr(na, 'find_keyring_prompt', lambda: None)  # this host may have one open
     text = na.describe_attach_timeout('http://127.0.0.1:9222')
     assert 'miadi-author-desk.ai.studio' in text and 'notebook.google.com' in text
     assert 'RotateCookiesPage' not in text
@@ -47,6 +48,7 @@ def test_attach_timeout_when_even_the_tab_list_is_silent(monkeypatch):
     def silent(*a, **k):
         raise TimeoutError
     monkeypatch.setattr(na.requests, 'get', silent)
+    monkeypatch.setattr(na, 'find_keyring_prompt', lambda: None)
     assert 'the tab list did not answer either' in na.describe_attach_timeout('http://127.0.0.1:9222')
 
 

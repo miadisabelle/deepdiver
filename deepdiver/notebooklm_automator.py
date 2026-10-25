@@ -156,8 +156,54 @@ def wake_background_tabs(cdp_url: str, pause: float = 1.0) -> int:
     return len(pages)
 
 
+def keyring_prompt_message(processes: List[Any], window_titles: List[str]) -> Optional[str]:
+    """What to tell a person when a GNOME keyring prompt holds Chrome, or None.
+
+    After a reboot Chrome waits behind "Unlock Login Keyring" (gcr-prompter) to
+    decrypt its stored sign-in, and only a person can type that password
+    (gaia, 2026-10-25). `processes` are (pid, name) pairs.
+    """
+    pids = [str(pid) for pid, name in processes if name == 'gcr-prompter']
+    windows = [w for w in window_titles if re.search(r'unlock .*keyring|keyring', w or '', re.I)]
+    if not pids and not windows:
+        return None
+    where = f"gcr-prompter, pid {', '.join(pids)}" if pids else f"window \"{windows[0]}\""
+    return (f"A GNOME keyring prompt is open on the desktop ({where}). Chrome waits behind it to "
+            "decrypt its stored sign-in, and only a person can unlock it: type the login keyring "
+            "password in the \"Unlock Login Keyring\" window, then retry.")
+
+
+def find_keyring_prompt() -> Optional[str]:
+    """Look for a keyring prompt on this host: a gcr-prompter process, or its window."""
+    processes = []
+    try:
+        for entry in os.listdir('/proc'):
+            if entry.isdigit():
+                try:
+                    with open(f'/proc/{entry}/comm') as fh:
+                        processes.append((int(entry), fh.read().strip()))
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    titles = []
+    if shutil.which('wmctrl'):
+        try:
+            env = dict(os.environ)
+            env.setdefault('DISPLAY', ':0')
+            out = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True, timeout=3, env=env).stdout
+            titles = [line.split(None, 3)[3] for line in out.splitlines() if len(line.split(None, 3)) == 4]
+        except Exception:
+            pass
+    return keyring_prompt_message(processes, titles)
+
+
 def describe_attach_timeout(cdp_url: str) -> str:
-    """What to tell a person when Playwright cannot attach: the open tabs, since one of them hangs."""
+    """What to tell a person when Playwright cannot attach: a keyring prompt when one is open,
+    else the open tabs, since one of them hangs."""
+    keyring = find_keyring_prompt()
+    if keyring:
+        return keyring
     try:
         tabs = requests.get(f"{cdp_url.rstrip('/')}/json", timeout=3).json()
         urls = [t.get('url', '') for t in tabs if t.get('type') == 'page']
@@ -1947,13 +1993,18 @@ class NotebookLMAutomator:
             await more.click(timeout=5000)
             item = self.page.get_by_role('menuitem', name=re.compile(r'(remove|delete)', re.I)).first
             await item.click(timeout=5000)
-            dialog = self.page.locator('mat-dialog-container, [role="dialog"]').last
-            confirm = dialog.get_by_role('button', name=re.compile(r'^\s*(delete|remove|confirm)', re.I))
+            # The "Delete <title>?" dialog renders after the menu closes. Counting its
+            # button at once found none, left the dialog open, and its backdrop
+            # blocked every later removal (Episode 297, 2026-10-25: 0 of 8).
+            dialogs = self.page.locator('mat-dialog-container, [role="dialog"]')
+            confirm = dialogs.get_by_role('button', name=re.compile(r'^\s*(delete|remove|confirm)', re.I)).first
             try:
-                if await confirm.count() > 0:
-                    await confirm.first.click(timeout=5000)
+                await confirm.wait_for(state='visible', timeout=10000)
+                await confirm.click(timeout=5000)
             except Exception:
-                pass
+                await self._close_dialog(dialogs)
+                return {'removed': False, 'title': found,
+                        'reason': 'the confirm dialog showed no Delete button within 10 s; it was closed'}
         except Exception as e:
             try:
                 await self.page.keyboard.press('Escape')
@@ -1967,6 +2018,20 @@ class NotebookLMAutomator:
                 self.logger.info(f"🗑️ Removed source: {found}")
                 return {'removed': True, 'title': found, 'reason': ''}
         return {'removed': False, 'title': found, 'reason': 'the row is still there after confirming'}
+
+    async def _close_dialog(self, dialogs) -> None:
+        """Close an open dialog, Cancel first, else Escape, so its backdrop blocks nothing after it."""
+        try:
+            cancel = dialogs.get_by_role('button', name=re.compile(r'^\s*(cancel|close)', re.I)).first
+            if await cancel.count() > 0 and await cancel.is_visible():
+                await cancel.click(timeout=3000)
+                return
+        except Exception:
+            pass
+        try:
+            await self.page.keyboard.press('Escape')
+        except Exception:
+            pass
 
     async def _count_sources(self) -> int:
         """Source rows in the Sources panel."""
