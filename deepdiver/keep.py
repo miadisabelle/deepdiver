@@ -10,7 +10,13 @@ download folder into what the episode commits:
 - a video or audio overview is re-encoded into `keep/`, the only place the
   chronicle's .gitignore lets `.mp4` and `.m4a` in (Episode 140's 31 MB video
   became 6.5 MB). The download stays beside it, out of git;
-- reports are kept as they are.
+- reports are kept as they are;
+- each kept video or audio overview gets its transcript beside it,
+  `keep/<name>.transcript.md`, so a person or an agent can review the
+  explainer by its words and orchestrate the next version from them
+  (William, 2026-10-26: "include in the process of DeepDiver downloading and
+  adding to the episode either an audio or video explainer its original
+  transcript").
 
 Each entry of manifest.json gains `kept`: the path relative to the folder, its
 size and sha256, and how it was made. The download's own `path`, `size` and
@@ -24,6 +30,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from typing import Any, Dict, List, Optional
 
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg')
@@ -62,6 +69,72 @@ def _kept_record(folder: str, path: str, how: str) -> Dict[str, Any]:
         'sha256': _sha256(path),
         'how': how,
     }
+
+
+TRANSCRIPT_HOW = 'faster-whisper {model}, English, machine transcription not checked'
+DEFAULT_TRANSCRIBER_HOME = os.path.expanduser('~/.local/share/deepdiver/transcribe-venv')
+
+
+def transcriber_python() -> Optional[str]:
+    """A Python that can run transcribe_worker.py: $DEEPDIVER_TRANSCRIBER_PYTHON,
+    else DeepDiver's own venv for it, else this Python when it has faster-whisper."""
+    env = os.environ.get('DEEPDIVER_TRANSCRIBER_PYTHON')
+    if env and os.path.exists(env):
+        return env
+    home = os.path.join(DEFAULT_TRANSCRIBER_HOME, 'bin', 'python')
+    if os.path.exists(home):
+        return home
+    try:
+        import faster_whisper  # noqa: F401
+        import numpy  # noqa: F401
+        return sys.executable
+    except Exception:
+        return None
+
+
+def transcribe_media(media: str, out: str, model: str = 'base') -> Optional[str]:
+    """Write `out` as timed lines of `media`; return None, or the reason it could not."""
+    python = transcriber_python()
+    if not python:
+        return ('no transcriber: set DEEPDIVER_TRANSCRIBER_PYTHON to a Python with faster-whisper, '
+                f'or make {DEFAULT_TRANSCRIBER_HOME} (python3 -m venv; pip install faster-whisper numpy)')
+    worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'transcribe_worker.py')
+    proc = subprocess.run([python, '-I', worker, media, out, model], capture_output=True, text=True)
+    if proc.returncode != 0 or not os.path.exists(out):
+        return (proc.stderr or f'transcriber exit {proc.returncode}').strip()[-400:]
+    return None
+
+
+def keep_transcript(entry: Dict[str, Any], folder: str, model: str = 'base') -> Dict[str, Any]:
+    """Give a kept video or audio its transcript beside it, named in the manifest."""
+    kept = entry.get('kept') or {}
+    path = kept.get('path') or ''
+    if os.path.splitext(path)[1].lower() not in VIDEO_EXTENSIONS + AUDIO_EXTENSIONS:
+        return entry
+    media = os.path.join(folder, path)
+    stem = os.path.splitext(path)[0]
+    target = os.path.join(folder, f'{stem}.transcript.md')
+    if not os.path.exists(target):
+        if not os.path.exists(media):
+            kept['transcript_error'] = 'kept media not on disk'
+            return entry
+        lines_file = target + '.txt'
+        error = transcribe_media(media, lines_file, model)
+        if error:
+            kept['transcript_error'] = error
+            return entry
+        with open(lines_file, encoding='utf-8') as fh:
+            lines = fh.read()
+        os.remove(lines_file)
+        how = TRANSCRIPT_HOW.format(model=model)
+        with open(target, 'w', encoding='utf-8') as fh:
+            fh.write(f"# Transcript: {entry.get('title') or os.path.basename(path)}\n\n"
+                     f"{entry.get('family_label') or 'Media'} `{path}`, {how}. "
+                     "Timecodes are minutes:seconds.\n\n" + lines)
+    kept.pop('transcript_error', None)
+    kept['transcript'] = {**_kept_record(folder, target, TRANSCRIPT_HOW.format(model=model))}
+    entry['kept'] = kept
+    return entry
 
 
 def keep_entry(entry: Dict[str, Any], folder: str) -> Dict[str, Any]:
@@ -131,13 +204,16 @@ def keep_entry(entry: Dict[str, Any], folder: str) -> Dict[str, Any]:
     return entry
 
 
-def keep_folder(folder: str) -> Dict[str, Any]:
-    """Apply keep_entry to every download in <folder>/manifest.json and rewrite it."""
+def keep_folder(folder: str, transcripts: bool = True, model: str = 'base') -> Dict[str, Any]:
+    """Apply keep_entry to every download in <folder>/manifest.json and rewrite it.
+    With transcripts, each kept video or audio also gets its transcript."""
     manifest_path = os.path.join(folder, 'manifest.json')
     with open(manifest_path, encoding='utf-8') as fh:
         manifest = json.load(fh)
     for entry in manifest.get('downloads', []):
         keep_entry(entry, folder)
+        if transcripts and entry.get('kept'):
+            keep_transcript(entry, folder, model)
     with open(manifest_path, 'w', encoding='utf-8') as fh:
         json.dump(manifest, fh, indent=2, ensure_ascii=False)
         fh.write('\n')

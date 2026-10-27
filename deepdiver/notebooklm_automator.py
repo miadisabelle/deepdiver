@@ -128,6 +128,15 @@ def match_source_titles(titles: List[str], wanted: str) -> List[int]:
     return []
 
 
+def match_studio_cards(cards: List[Dict[str, Any]], ref: str) -> List[Dict[str, Any]]:
+    """The Studio cards an iterate names: by artifact id, else by exact title."""
+    want = (ref or '').strip()
+    by_id = [c for c in cards if c.get('artifact_id') and c.get('artifact_id') == want]
+    if by_id:
+        return by_id
+    return [c for c in cards if (c.get('title') or '').strip() == want]
+
+
 BLANK_TAB_URLS = ('about:blank', 'chrome://newtab/', 'chrome://new-tab-page/')
 
 # Playwright attaches to every tab when it connects over CDP, and one tab whose
@@ -3082,6 +3091,106 @@ class NotebookLMAutomator:
             import traceback
             self.logger.error(traceback.format_exc())
             return None
+
+    async def _open_iterate_dialog(self, card) -> Dict[str, Any]:
+        """
+        From one Studio card, open "View prompt and sources" and press its
+        Iterate button (aria-label "Iterate", observed 2026-10-26 on a Video
+        Overview card). Iterate opens the family's Customize dialog with the
+        card's own prompt already in it.
+
+        Returns {'dialog': locator or None, 'previous_prompt': str}. A card
+        whose prompt dialog has no Iterate button returns dialog None, after
+        closing what it opened.
+        """
+        dialogs = self.page.locator('mat-dialog-container, [role="dialog"]')
+        await card.locator('button:has(mat-icon:text-is("more_vert")), button[aria-label*="More"]').first.click(timeout=5000)
+        await self.page.get_by_role('menuitem', name=re.compile(r'view prompt', re.I)).first.click(timeout=5000)
+        prompt_dialog = dialogs.last
+        await prompt_dialog.wait_for(state='visible', timeout=10000)
+        previous = ''
+        try:
+            previous = (await prompt_dialog.inner_text()).strip()
+        except Exception:
+            pass
+        iterate = prompt_dialog.locator('button[aria-label="Iterate"], button.iterate-button').first
+        if await iterate.count() == 0:
+            await self._close_dialog(dialogs)
+            return {'dialog': None, 'previous_prompt': previous}
+        await iterate.click(timeout=5000)
+        customize = dialogs.filter(has=self.page.locator('textarea')).last
+        await customize.wait_for(state='visible', timeout=10000)
+        try:
+            previous = await customize.locator('textarea').first.input_value()
+        except Exception:
+            pass
+        return {'dialog': customize, 'previous_prompt': previous}
+
+    async def iterate_studio_artifact(self, ref: str, instruction: str, notebook_id: str = None,
+                                      dry_run: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Make a new version of a Studio artifact from its own prompt, revised.
+
+        William, 2026-10-26: use "Iterate" from an existing video explainer to
+        create a new version of an explainer. The card is named by artifact id
+        or exact title. Where the card's prompt dialog has an Iterate button,
+        its Customize dialog is filled with ``instruction`` and generated;
+        otherwise the card's family is generated afresh with ``instruction``
+        as its prompt. ``dry_run`` fills the dialog, reads it back and closes
+        it without generating.
+        """
+        if not self.page:
+            self.logger.error("❌ No browser page available")
+            return None
+        if notebook_id and not await self.navigate_to_notebook(notebook_id=notebook_id):
+            return None
+        await self.dismiss_rebrand_modal()
+
+        cards = await self.list_studio_artifacts()
+        matches = match_studio_cards(cards, ref)
+        if not matches:
+            self.logger.error(f"❌ No Studio card is titled or identified '{ref}'")
+            return None
+        if len(matches) > 1:
+            self.logger.error(f"❌ {len(matches)} Studio cards are titled '{ref}'; name one by its artifact id")
+            return None
+        source = matches[0]
+        type_key = normalize_artifact_type(source.get('family_label') or '')
+        card = self.page.locator(ARTIFACT_CARD_SELECTOR).nth(source['dom_index'])
+
+        opened = await self._open_iterate_dialog(card)
+        base = {'iterated_from': {'artifact_id': source.get('artifact_id'), 'title': source.get('title'),
+                                  'family_label': source.get('family_label')},
+                'previous_prompt': opened['previous_prompt'], 'instruction': instruction}
+        dialogs = self.page.locator('mat-dialog-container, [role="dialog"]')
+
+        if opened['dialog'] is None:
+            if dry_run or type_key is None:
+                return {**base, 'mode': 'generate', 'dry_run': dry_run,
+                        'reason': 'this card has no Iterate; a new one is generated from the instruction'}
+            self.logger.info("ℹ️ No Iterate for this card: generating its family from the instruction")
+            result = await self.generate_studio_artifact(type_key, focus_prompt=instruction)
+            return {**result, **base, 'mode': 'generate'} if result else None
+
+        textarea = opened['dialog'].locator('textarea').first
+        await textarea.fill(instruction[:5000])
+        if dry_run:
+            filled = await textarea.input_value()
+            await self._close_dialog(dialogs)
+            return {**base, 'mode': 'iterate', 'dry_run': True, 'filled': filled}
+
+        baseline_snapshot = await self._completed_card_snapshot(type_key) if type_key else []
+        start = time.time()
+        await opened['dialog'].get_by_role('button', name=re.compile(r'^\s*generate', re.I)).first.click(timeout=10000)
+        studio_config = self.config.get('STUDIO_SETTINGS', {}).get(type_key or '', {}) if hasattr(self, 'config') else {}
+        result = await self._monitor_artifact_generation(
+            start, studio_config.get('generation_timeout', 900), studio_config.get('polling_interval', 5),
+            artifact_type=type_key, baseline_count=len(baseline_snapshot),
+            baseline_keys={c['card_key'] for c in baseline_snapshot})
+        if not result:
+            self.logger.error("❌ The iterated version did not appear")
+            return None
+        return {**result, **base, 'mode': 'iterate', 'focus_prompt': instruction}
 
     async def _drive_tile_dialog(self, label: str, spec: Dict[str, Any],
                                  format_display: Optional[str], language: Optional[str],

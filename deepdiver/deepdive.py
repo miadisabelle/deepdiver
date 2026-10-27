@@ -1499,7 +1499,7 @@ def studio_list(notebook_id: Optional[str], cdp_url: str, config: str):
               help='Output directory (default: STUDIO_SETTINGS.artifact_download_dir)')
 @click.option('--keep', 'keep', is_flag=True, default=False,
               help='Also make what a git repository keeps: infographics as WebP, '
-                   'video and audio re-encoded into keep/, recorded as "kept" in the manifest')
+                   'video and audio re-encoded into keep/ with their transcripts, recorded as "kept" in the manifest')
 @cdp_url_option
 @click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
               help='Path to configuration file')
@@ -1570,31 +1570,102 @@ def studio_download(notebook_id: Optional[str], output: Optional[str], keep: boo
         sys.exit(1)
 
 
-def _print_kept(folder: str) -> bool:
+def _print_kept(folder: str, transcripts: bool = True) -> bool:
     """Run the keep step on a download folder and print what it kept."""
     from .keep import keep_folder
-    console.print("📦 Keeping for git: WebP, keep/ re-encodes...", style="blue")
-    manifest = keep_folder(folder)
+    console.print("📦 Keeping for git: WebP, keep/ re-encodes" + (", transcripts..." if transcripts else "..."),
+                  style="blue")
+    manifest = keep_folder(folder, transcripts=transcripts)
     ok = True
     for entry in manifest.get('downloads', []):
         if entry.get('kept'):
             kept = entry['kept']
             console.print(f"  • {entry['title']} → {kept['path']} ({kept['size'] / (1024 * 1024):.1f} MB)",
                           style="cyan")
+            if kept.get('transcript'):
+                console.print(f"      transcript → {kept['transcript']['path']}", style="dim")
+            elif kept.get('transcript_error'):
+                ok = False
+                console.print(f"      no transcript: {kept['transcript_error']}", style="red")
         else:
             ok = False
             console.print(f"  • {entry['title']}: not kept, {entry.get('kept_error', 'unknown')}", style="red")
     return ok
 
 
+@studio.command(name='iterate')
+@click.argument('artifact')
+@click.option('--instruction', '-i', 'instruction_file', required=True, type=click.Path(exists=True, dir_okay=False),
+              help='File holding the new prompt for this version')
+@click.option('--notebook-id', '-n', help='Notebook ID (uses current page if not provided)')
+@click.option('--dry-run', is_flag=True, default=False,
+              help="Fill the card's Iterate dialog, read it back and close it without generating")
+@cdp_url_option
+@click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
+              help='Path to configuration file')
+def studio_iterate(artifact: str, instruction_file: str, notebook_id: Optional[str], dry_run: bool,
+                   cdp_url: str, config: str):
+    """Make a new version of an artifact from its own prompt, revised.
+
+    ARTIFACT is the card's artifact id or exact title. Where the card's
+    "View prompt and sources" dialog offers Iterate (Video Overviews do), its
+    Customize dialog is filled with the instruction file and generated, so
+    the new version keeps the card's format and sources. Otherwise the card's
+    family is generated afresh with the instruction as its prompt.
+
+    Example:
+        deepdiver studio iterate "Session Continuity" -n abc-123 -i explainer-v3.md
+        deepdiver studio iterate 919ca278-1dfd-43c8-a544-d0a834449d09 -n abc-123 -i v3.md --dry-run
+    """
+    from .notebooklm_automator import NotebookLMAutomator
+    from .session_tracker import SessionTracker
+
+    instruction = Path(instruction_file).read_text(encoding='utf-8').strip()
+    if not instruction:
+        console.print(f"❌ {instruction_file} is empty", style="red")
+        sys.exit(1)
+
+    async def run_iterate():
+        tracker = SessionTracker()
+        tracker.load_current_session()
+        automator = NotebookLMAutomator(config, cdp_url_override=cdp_url, session_tracker=tracker)
+        if not await automator.connect_to_browser():
+            console.print("❌ Failed to connect to browser", style="red")
+            return False
+        result = await automator.iterate_studio_artifact(artifact, instruction, notebook_id=notebook_id,
+                                                         dry_run=dry_run)
+        if not result:
+            return False
+        origin = result['iterated_from']
+        console.print(f"🔁 From: [{origin.get('family_label')}] {origin.get('title')} ({origin.get('artifact_id')})",
+                      style="cyan")
+        if result.get('dry_run'):
+            if result['mode'] == 'iterate':
+                console.print("✅ Iterate dialog filled and closed, nothing generated", style="green")
+                console.print(f"   was: {result['previous_prompt'][:160]}", style="dim")
+                console.print(f"   now: {result['filled'][:160]}", style="dim")
+            else:
+                console.print(f"ℹ️ {result['reason']} (dry run: nothing generated)", style="yellow")
+            return True
+        console.print(f"✅ New version ({result['mode']}): {result.get('title')} · {result.get('artifact_id')}",
+                      style="green")
+        return True
+
+    if not asyncio.run(run_iterate()):
+        sys.exit(1)
+
+
 @studio.command(name='keep')
 @click.argument('folder')
-def studio_keep(folder: str):
+@click.option('--no-transcript', is_flag=True, default=False,
+              help='Skip the transcripts of kept video and audio (they take a few minutes each)')
+def studio_keep(folder: str, no_transcript: bool):
     """Make what a git repository keeps from a download folder.
 
     Infographics become WebP (quality 90, no metadata) and the PNG is removed;
     video and audio overviews are re-encoded into keep/, the download staying
-    beside them; reports stay as they are. manifest.json records each as
+    beside them, each with its transcript (keep/<name>.transcript.md); reports
+    stay as they are. manifest.json records each as
     "kept". Run it on a folder `studio download` wrote. Needs ffmpeg.
 
     Example:
@@ -1603,7 +1674,7 @@ def studio_keep(folder: str):
     if not os.path.isfile(os.path.join(folder, 'manifest.json')):
         console.print(f"❌ No manifest.json in {folder}", style="red")
         sys.exit(1)
-    if not _print_kept(folder):
+    if not _print_kept(folder, transcripts=not no_transcript):
         sys.exit(1)
 
 
