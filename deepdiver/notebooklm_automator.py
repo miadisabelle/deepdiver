@@ -144,6 +144,12 @@ BLANK_TAB_URLS = ('about:blank', 'chrome://newtab/', 'chrome://new-tab-page/')
 # in DeepDiver's Chrome). Give up after this long and say why.
 CDP_ATTACH_TIMEOUT_MS = 30000
 
+# A generation that started shows a generating card within seconds. With no
+# such card after this long, nothing is being generated (2026-10-29: 902 s and
+# 1802 s spent waiting on generations that never started).
+# STUDIO_SETTINGS.<family>.generation_start_timeout overrides it.
+GENERATION_START_TIMEOUT_S = 120
+
 
 def wake_background_tabs(cdp_url: str, pause: float = 1.0) -> int:
     """Bring each tab to the front once, then the first one again, through the
@@ -2716,9 +2722,17 @@ class NotebookLMAutomator:
         artifact_type: str = 'audio_overview',
         baseline_count: int = 0,
         baseline_keys: Optional[set] = None,
+        start_timeout: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Monitor Studio artifact generation until a completed card appears.
+
+        It stops early, with the reason in ``self.last_generation_refusal``,
+        when the page says the daily limit is reached, or when no card of the
+        family is generating and none completed within ``start_timeout``
+        seconds. On 2026-10-29 an Infographic and a Video Overview each waited
+        out their whole timeout (902 s, 1802 s) with no card ever started,
+        and the next Video Overview was refused by the daily limit.
 
         🔥 West (Action): Patient watching for creation to complete.
 
@@ -2740,11 +2754,25 @@ class NotebookLMAutomator:
         Returns:
             Optional[Dict[str, Any]]: Artifact metadata if completed, None if timeout/error
         """
+        self.last_generation_refusal = None
+        if start_timeout is None:
+            start_timeout = GENERATION_START_TIMEOUT_S
         try:
             last_log_time = start_time
+            started = False
 
             while time.time() - start_time < timeout:
                 elapsed = int(time.time() - start_time)
+
+                if not started:
+                    started = await self._generation_in_progress()
+                    # A limit counts only while nothing is generating: a card
+                    # already under way is not undone by the sentence.
+                    limit = None if started else await self._daily_limit_on_page(artifact_type)
+                    if limit:
+                        self.logger.error(f"❌ Gemini Notebook says: {limit}. Nothing was generated; try again tomorrow.")
+                        self.last_generation_refusal = limit
+                        return None
 
                 # Log progress every 30 seconds
                 if time.time() - last_log_time >= 30:
@@ -2762,6 +2790,13 @@ class NotebookLMAutomator:
                         self.logger.info(f"✅ Generation completed in {generation_time}s")
                         result['generation_time'] = generation_time
                         return result
+
+                if not started and elapsed >= start_timeout:
+                    self.logger.error(
+                        f"❌ No {artifact_type} card started generating within {elapsed}s; nothing was generated"
+                    )
+                    self.last_generation_refusal = 'did not start'
+                    return None
 
                 # Wait before polling again
                 await self.page.wait_for_timeout(polling_interval * 1000)
@@ -2793,6 +2828,32 @@ class NotebookLMAutomator:
         except Exception as e:
             self.logger.error(f"❌ Error monitoring generation: {e}")
             return None
+
+    async def _daily_limit_on_page(self, artifact_type: Optional[str] = None) -> Optional[str]:
+        """The page's daily-limit sentence, read while a generation is watched.
+
+        With ``artifact_type``, only a sentence naming that family counts
+        ("Video Overview and Infographic" names both), so a limit left on the
+        page by another family does not stop a Report.
+        """
+        try:
+            limit = daily_limit_message(await self.page.inner_text('body'))
+        except Exception:
+            return None
+        if limit and artifact_type:
+            label = ARTIFACT_TYPES.get(artifact_type, {}).get('label')
+            if label and label.lower() not in limit.lower():
+                return None
+        return limit
+
+    async def _generation_in_progress(self) -> bool:
+        """True when any Studio card is still generating (its main button disabled)."""
+        try:
+            return await self.page.query_selector(
+                f'{ARTIFACT_CARD_SELECTOR} {GENERATING_CARD_MARKER}'
+            ) is not None
+        except Exception:
+            return False
 
     async def _card_family_label(self, card) -> Optional[str]:
         """
@@ -3061,6 +3122,7 @@ class NotebookLMAutomator:
                 artifact_type=type_key,
                 baseline_count=baseline_count,
                 baseline_keys=baseline_keys,
+                start_timeout=studio_config.get('generation_start_timeout', GENERATION_START_TIMEOUT_S),
             )
 
             if not artifact_data:

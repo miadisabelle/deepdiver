@@ -76,6 +76,8 @@ STUDIO_SETTINGS:
     default_language: English
     generation_timeout: 900
     polling_interval: 5
+  # generation_start_timeout (default 120 s): with no card generating after
+  # this long, the run ends "did not start" instead of waiting out the timeout.
   # Other families (mind_map, reports, flashcards, quiz, infographic,
   # data_table) accept the same keys; unset families use safe defaults.
   artifact_download_dir: ./output/artifacts
