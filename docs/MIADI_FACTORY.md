@@ -39,6 +39,10 @@ DeepDiver is an instrument of **T6 · Production** (after an episode). Its human
 | ask the notebook a question | `deepdiver notebook ask <id> "<question>" -o asked.md` |
 | generate an artifact | `deepdiver studio generate <family> -n <id> [--focus "..."]` |
 | generate a report | `deepdiver studio report [--format document] [--template "..."] [--prompt "..."] -n <id>` |
+| stop a Slide Deck or Video Overview at its plan | `deepdiver studio slide-deck --review ...` or `deepdiver studio generate video_overview --review ...` |
+| save a paused card's plan, leaving it paused | `deepdiver studio outline <card id> -n <id> -o <dir>` |
+| save the plan and feedback, then render | `deepdiver studio proceed <card id> -n <id> -o <dir> [-i feedback.md]` |
+| the next version of a plan | `deepdiver studio slide-deck --from-outline <dir>/outline-01-<card>.md [--feedback f.md] -n <id>`: a new run, stopped at its own plan |
 | see the Studio panel | `deepdiver studio list -n <id>` |
 | download everything | `deepdiver studio download -n <id> -o <dir>` |
 | download for an episode's git | `deepdiver studio download -n <id> -o <episode>/captures/notebook-<id> --keep`, or `deepdiver studio keep <dir>` after: infographics as WebP, video and audio re-encoded into `keep/`, `kept` in `manifest.json` |
@@ -48,11 +52,13 @@ DeepDiver is an instrument of **T6 · Production** (after an episode). Its human
 
 - Media files named after the artifact title: `.m4a` (Audio Overview), `.mp4` (Video Overview), `.png` (Infographic).
 - Reports as `.md` and `.html`, read from the report viewer, since Gemini Notebook gives reports no file download.
+- Plans as `outline-<NN>-<card>.md`, with their feedback as `outline-<NN>-<card>.feedback.md`, listed in `manifest.json` under `downloads`, where the episode room reads them. Studio keeps neither once the render starts.
+- Slide decks as PDF. `--keep` recompresses it into `keep/` and removes the download. Every page is an image, in the PowerPoint too, so the saved plan is the deck's text.
 - Answers to questions, appended to a Markdown file with the notebook's citations as `[n]`.
 - `manifest.json` beside them: title, family, path, sha256, size, and codec and duration from ffprobe.
 - The session record in `sessions/current_session.json` (notebook ID, sources, artifacts, downloads).
 
-Mind Map cards have no Download item. Slide Deck, Reports, Flashcards, Quiz and Data Table downloads were not tested.
+Mind Map cards have no Download item. Flashcards, Quiz and Data Table downloads were not tested.
 
 ## The pipeline, in order
 
@@ -95,6 +101,7 @@ On gaia, Chrome 154, a clone of the AVA profile (`ava@jgwill.com`):
 | Video Overview formats are Short (9:16) and Explainer (16:9) | the "Brief" format was not found |
 | an open file picker makes Chrome block `window.open` | downloads after a file upload did not start |
 | a same-day YouTube video has no transcript | the URL was counted as a source |
+| a Slide Deck or Video Overview can stop at a plan, on a card that looks finished (2026-11-05) | "Outline ready" would have been reported as the deck, and its download attempted |
 
 A search for an "Add" button also matched the header's "Create notebook" button, whose icon renders as the text `add_2`. Three empty notebooks named "Untitled notebook" were created in the AVA account that way on 2026-10-06. The selector is fixed, and those notebooks are still there.
 

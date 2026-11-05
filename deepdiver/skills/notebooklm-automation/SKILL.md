@@ -50,6 +50,10 @@ deepdiver studio audio --format deep_dive --language French --length long \
   --focus "..." --notebook-id <id> --download    # generate + download mp3
 deepdiver studio slide-deck --format presenter --focus "..." -n <id>
 deepdiver studio generate <type> -n <id>        # any Studio family
+deepdiver studio generate video_overview --review --focus "..." -n <id>   # stop at the producer notes (slide-deck --review: at the outline)
+deepdiver studio outline <card id> -n <id> -o <dir>   # save a paused card's plan as outline-<NN>-<card>.md; the card stays paused
+deepdiver studio proceed <card id> -n <id> -o <dir> [-i feedback.md]   # save the plan and feedback, then render; cannot be taken back
+deepdiver studio slide-deck --from-outline <dir>/outline-01-<card>.md [--feedback f.md] -n <id>   # next version: a new run seeded from a kept plan, stopped at its own plan
 deepdiver studio list -n <id>                   # artifact cards currently visible
 deepdiver studio download -n <id> -o <dir>      # every downloadable card + reports as .md/.html + manifest.json
 deepdiver studio download -n <id> -o <dir> --keep   # also WebP infographics, video/audio re-encoded into keep/, "kept" in manifest.json
@@ -94,6 +98,20 @@ Artifact types for `studio generate`: `audio_overview`, `slide_deck`,
   `artifact-library-item` card with `aria-description` naming the family,
   `button[aria-label="Play"]`, and a More button; title/details live in
   `.artifact-title` / `.artifact-details`. Legacy "Load" buttons are gone.
+- **The review step (2026-11-05).** A Slide Deck or Video Overview made with
+  the dialog's review switch (`button[role="switch"]`, off by default) stops at
+  a card "Outline ready" with a Review button. That card has a More menu and
+  looks finished; `.artifact-item-button-pending-review` is what says it is not.
+  Review opens the plan in the Studio panel, not in a dialog. Sending feedback
+  renders at once with it applied: there is no second plan to read. Studio keeps
+  neither the plan nor the feedback ("Prompt and sources" shows only the first
+  prompt), so save first, which `studio outline` and `studio proceed` do.
+- **"Try it" on the step-by-step banner posts to chat.** It sends "Help me create
+  slides about this" into the notebook's chat, and the answer is a card with a
+  format, a length, a language, a slide focus and a visual style written by the
+  model, its own review switch and Generate. DeepDiver goes through the tile.
+- **Slide decks are pictures.** PDF and PowerPoint hold one image per slide and
+  no text, so a word check or a citation check has to read the saved plan.
 - **"Generating Audio Overview... Come back in a few minutes"** in the UI
   justifies continued waiting even when process logs go quiet.
 - **Sharing gate ≠ failure.** A ready Slide Deck can show a disabled

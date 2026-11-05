@@ -24,10 +24,14 @@ from urllib.parse import urljoin
 import yaml
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
+from .outline import plan_is_empty, record_proceed, save_feedback, save_outline
 from .studio_artifacts import (
     ARTIFACT_CARD_SELECTOR,
     ARTIFACT_TYPES,
     GENERATING_CARD_MARKER,
+    PENDING_REVIEW_MARKER,
+    PLAN_SELECTOR,
+    REVIEW_BUTTON_SELECTOR,
     completed_card_selectors,
     family_label_from_icon,
     get_artifact_spec,
@@ -166,6 +170,8 @@ CDP_ATTACH_TIMEOUT_MS = 30000
 # 1802 s spent waiting on generations that never started).
 # STUDIO_SETTINGS.<family>.generation_start_timeout overrides it.
 GENERATION_START_TIMEOUT_S = 120
+# A tile's Customize dialog normally opens within a second (0.3 to 0.6 s, 2026-11-05).
+TILE_DIALOG_WAIT_MS = 8000
 
 
 def wake_background_tabs(cdp_url: str, pause: float = 1.0) -> int:
@@ -2723,6 +2729,10 @@ class NotebookLMAutomator:
                         data['generating'] = await card.query_selector(GENERATING_CARD_MARKER) is not None
                     except Exception:
                         data['generating'] = False
+                    try:
+                        data['awaiting_review'] = await card.query_selector(PENDING_REVIEW_MARKER) is not None
+                    except Exception:
+                        data['awaiting_review'] = False
                     artifacts.append(data)
                 except Exception:
                     continue
@@ -2740,6 +2750,7 @@ class NotebookLMAutomator:
         baseline_count: int = 0,
         baseline_keys: Optional[set] = None,
         start_timeout: Optional[int] = None,
+        stop_at_review: Optional[set] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Monitor Studio artifact generation until a completed card appears.
@@ -2767,6 +2778,9 @@ class NotebookLMAutomator:
                             these keys so the returned metadata describes the
                             freshly generated artifact — not whichever card the
                             completion selectors happened to match first.
+            stop_at_review: Ids of the cards already paused at a plan. When
+                            given, the watch ends at the first OTHER paused card
+                            of this family, with status 'awaiting_review'.
 
         Returns:
             Optional[Dict[str, Any]]: Artifact metadata if completed, None if timeout/error
@@ -2795,6 +2809,13 @@ class NotebookLMAutomator:
                 if time.time() - last_log_time >= 30:
                     self.logger.info(f"⏳ Still generating... ({elapsed}s elapsed)")
                     last_log_time = time.time()
+
+                if stop_at_review is not None:
+                    paused = await self._new_paused_card(artifact_type, stop_at_review)
+                    if paused:
+                        paused['generation_time'] = int(time.time() - start_time)
+                        self.logger.info(f"⏸️ Plan ready for review after {paused['generation_time']}s")
+                        return paused
 
                 detected = await self.detect_completed_artifact(artifact_type)
                 if detected:
@@ -2906,11 +2927,28 @@ class NotebookLMAutomator:
                     continue
                 if await card.query_selector(GENERATING_CARD_MARKER):
                     continue
+                if await card.query_selector(PENDING_REVIEW_MARKER):
+                    continue
                 if await self._card_family_label(card) == label:
                     ready.append(card)
             except Exception:
                 continue
         return ready
+
+    async def _paused_cards(self, artifact_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """The Studio cards stopped at a plan, of one family when it is named."""
+        spec = get_artifact_spec(artifact_type) if artifact_type else None
+        return [c for c in await self.list_studio_artifacts()
+                if c.get('awaiting_review') and (not spec or c.get('family_label') == spec['label'])]
+
+    async def _new_paused_card(self, artifact_type: str, known: set) -> Optional[Dict[str, Any]]:
+        """A card of this family paused at a plan that was not paused before, newest first."""
+        for card in await self._paused_cards(artifact_type):
+            if card.get('artifact_id') not in known:
+                card['status'] = 'awaiting_review'
+                card['type'] = normalize_artifact_type(artifact_type) or artifact_type
+                return card
+        return None
 
     async def _count_completed_cards(self, artifact_type: str) -> int:
         """Count visible completed cards for an artifact family."""
@@ -3042,6 +3080,7 @@ class NotebookLMAutomator:
         focus_prompt: str = None,
         notebook_id: str = None,
         template: str = None,
+        review: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Generate any Studio artifact through its tile + customization dialog.
@@ -3068,6 +3107,8 @@ class NotebookLMAutomator:
             length: Length option where the family supports one
             focus_prompt: Free-text guidance for the generator
             notebook_id: Target notebook (navigates if provided)
+            review: Turn on the dialog's review switch and stop at the plan
+                (Slide Deck and Video Overview), status 'awaiting_review'.
 
         Returns:
             Artifact metadata dict, or None on failure.
@@ -3086,6 +3127,10 @@ class NotebookLMAutomator:
 
         spec = get_artifact_spec(type_key)
         label = spec['label']
+
+        if review and not spec.get('review_switch'):
+            self.logger.error(f"❌ {label} has no review step; only Slide Deck and Video Overview have one")
+            return None
 
         try:
             if not self.page:
@@ -3117,6 +3162,9 @@ class NotebookLMAutomator:
             baseline_snapshot = await self._completed_card_snapshot(type_key)
             baseline_count = len(baseline_snapshot)
             baseline_keys = {c['card_key'] for c in baseline_snapshot}
+            paused_before = (
+                {c.get('artifact_id') for c in await self._paused_cards(type_key)} if review else None
+            )
 
             generation_start_time = time.time()
             if type_key == 'reports':
@@ -3124,7 +3172,7 @@ class NotebookLMAutomator:
                     format_display, template, language, focus_prompt)
             else:
                 started = await self._drive_tile_dialog(
-                    label, spec, format_display, language, length, focus_prompt)
+                    label, spec, format_display, language, length, focus_prompt, review=review)
             if not started:
                 return None
 
@@ -3140,6 +3188,7 @@ class NotebookLMAutomator:
                 baseline_count=baseline_count,
                 baseline_keys=baseline_keys,
                 start_timeout=studio_config.get('generation_start_timeout', GENERATION_START_TIMEOUT_S),
+                stop_at_review=paused_before,
             )
 
             if not artifact_data:
@@ -3153,7 +3202,10 @@ class NotebookLMAutomator:
             artifact_data['length'] = length
             artifact_data['focus_prompt'] = focus_prompt if focus_prompt else None
 
-            self.logger.info(f"✅ {label} generated successfully!")
+            if artifact_data.get('status') == 'awaiting_review':
+                self.logger.info(f"⏸️ {label}: plan ready, nothing rendered yet")
+            else:
+                self.logger.info(f"✅ {label} generated successfully!")
             self.logger.info(f"📋 Artifact ID: {artifact_data.get('artifact_id', 'unknown')}")
 
             if notebook_id and self.session_tracker:
@@ -3206,7 +3258,7 @@ class NotebookLMAutomator:
         return {'dialog': customize, 'previous_prompt': previous}
 
     async def iterate_studio_artifact(self, ref: str, instruction: str, notebook_id: str = None,
-                                      dry_run: bool = False) -> Optional[Dict[str, Any]]:
+                                      dry_run: bool = False, review: bool = False) -> Optional[Dict[str, Any]]:
         """
         Make a new version of a Studio artifact from its own prompt, revised.
 
@@ -3248,24 +3300,34 @@ class NotebookLMAutomator:
                 return {**base, 'mode': 'generate', 'dry_run': dry_run,
                         'reason': 'this card has no Iterate; a new one is generated from the instruction'}
             self.logger.info("ℹ️ No Iterate for this card: generating its family from the instruction")
-            result = await self.generate_studio_artifact(type_key, focus_prompt=instruction)
+            result = await self.generate_studio_artifact(type_key, focus_prompt=instruction, review=review)
             return {**result, **base, 'mode': 'generate'} if result else None
 
         textarea = opened['dialog'].locator('textarea').first
         await textarea.fill(instruction[:5000])
+        spec = get_artifact_spec(type_key) if type_key else None
+        if review:
+            if not (spec and spec.get('review_switch')):
+                self.logger.error("❌ This card's family has no review step; nothing generated")
+                await self._close_dialog(dialogs)
+                return None
+            if not await self._turn_on_review(opened['dialog'], spec):
+                await self._close_dialog(dialogs)
+                return None
         if dry_run:
             filled = await textarea.input_value()
             await self._close_dialog(dialogs)
-            return {**base, 'mode': 'iterate', 'dry_run': True, 'filled': filled}
+            return {**base, 'mode': 'iterate', 'dry_run': True, 'filled': filled, 'review': review}
 
         baseline_snapshot = await self._completed_card_snapshot(type_key) if type_key else []
+        paused_before = {c.get('artifact_id') for c in await self._paused_cards(type_key)} if review else None
         start = time.time()
         await opened['dialog'].get_by_role('button', name=re.compile(r'^\s*generate', re.I)).first.click(timeout=10000)
         studio_config = self.config.get('STUDIO_SETTINGS', {}).get(type_key or '', {}) if hasattr(self, 'config') else {}
         result = await self._monitor_artifact_generation(
             start, studio_config.get('generation_timeout', 900), studio_config.get('polling_interval', 5),
             artifact_type=type_key, baseline_count=len(baseline_snapshot),
-            baseline_keys={c['card_key'] for c in baseline_snapshot})
+            baseline_keys={c['card_key'] for c in baseline_snapshot}, stop_at_review=paused_before)
         if not result:
             self.logger.error("❌ The iterated version did not appear")
             return None
@@ -3273,7 +3335,8 @@ class NotebookLMAutomator:
 
     async def _drive_tile_dialog(self, label: str, spec: Dict[str, Any],
                                  format_display: Optional[str], language: Optional[str],
-                                 length: Optional[str], focus_prompt: Optional[str]) -> bool:
+                                 length: Optional[str], focus_prompt: Optional[str],
+                                 review: bool = False) -> bool:
         """Open a Studio tile, fill its customization dialog and press Generate."""
         # Open the tile → customization dialog.
         dialog = self.page.get_by_role('dialog').filter(has_text=label)
@@ -3282,12 +3345,19 @@ class NotebookLMAutomator:
                 self.page.get_by_role('button', name=label, exact=False),
                 self.page.get_by_text(label, exact=False),
             ]
+            # A family with options has a dialog to wait for. Mind Map starts from
+            # its tile, so it keeps the short wait.
+            expects_dialog = bool(spec.get('formats') or spec.get('supports_focus_prompt'))
+            dialog_wait_ms = TILE_DIALOG_WAIT_MS if expects_dialog else 1500
             for tile in tile_candidates:
                 try:
                     if await tile.count() > 0:
                         await tile.first.click(timeout=10000)
-                        await self.page.wait_for_timeout(1500)
                         dialog = self.page.get_by_role('dialog').filter(has_text=label)
+                        waited = 0
+                        while waited < dialog_wait_ms and await dialog.count() == 0:
+                            await self.page.wait_for_timeout(250)
+                            waited += 250
                         if await dialog.count() > 0:
                             break
                 except Exception:
@@ -3323,7 +3393,10 @@ class NotebookLMAutomator:
             if length and spec.get('supports_length'):
                 length_display = length.strip().capitalize()
                 try:
-                    toggle = dialog.get_by_role('button', name=length_display, exact=False)
+                    # A segmented toggle whose buttons have role "radio" (2026-11-05).
+                    toggle = dialog.get_by_role('radio', name=length_display, exact=True)
+                    if await toggle.count() == 0:
+                        toggle = dialog.get_by_role('button', name=length_display, exact=False)
                     if await toggle.count() > 0:
                         await toggle.first.click(timeout=5000)
                         self.logger.info(f"✅ Length selected: {length_display}")
@@ -3357,6 +3430,10 @@ class NotebookLMAutomator:
                 else:
                     self.logger.warning("⚠️ Could not find prompt field in dialog")
 
+            if review and not await self._turn_on_review(dialog, spec):
+                await self._close_dialogs()
+                return False
+
             # Generate — resolved INSIDE the dialog, never globally.
             clicked = False
             for generate in [
@@ -3375,6 +3452,19 @@ class NotebookLMAutomator:
                 self.logger.error("❌ Could not click Generate in dialog")
                 return False
         else:
+            # The cause of this is not known yet (2026-11-05, twice, each on a tab
+            # already used; not reproduced in replays), so say what the page shows.
+            on_page = await self._overlay_text()
+            if on_page:
+                self.logger.warning(f"⚠️ No dialog for {label}; the page shows: {on_page}")
+            if review:
+                # A tile that started on its own has no plan to stop at.
+                try:
+                    limit = daily_limit_message(await self.page.inner_text('body'))
+                except Exception:
+                    limit = None
+                self.logger.error(f"❌ {limit or 'No customization dialog opened'}; the review switch was not set")
+                return False
             # Some tiles start generation immediately without a dialog;
             # continue to monitoring rather than treating this as failure.
             try:
@@ -3386,6 +3476,220 @@ class NotebookLMAutomator:
                 return False
             self.logger.info("ℹ️ No customization dialog appeared — assuming generation started from tile")
         return True
+
+    async def _overlay_text(self) -> str:
+        """What a toast, an alert or an overlay is saying, for a failure's log line."""
+        try:
+            lines = await self.page.evaluate("""() => [...document.querySelectorAll(
+                '.cdk-overlay-pane, mat-snack-bar-container, [role="alert"]')]
+                .filter(e => e.offsetWidth || e.offsetHeight)
+                .map(e => (e.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 160)).filter(Boolean)""")
+            return ' | '.join(lines)
+        except Exception:
+            return ''
+
+    async def _turn_on_review(self, dialog, spec: Dict[str, Any]) -> bool:
+        """Turn on a Customize dialog's review switch, and read it back on."""
+        name = spec.get('review_switch') or 'review'
+        switch = dialog.locator('button[role="switch"]').first
+        try:
+            if await dialog.locator('button[role="switch"]').count() == 0:
+                self.logger.error(f"❌ This dialog has no '{name}' switch; nothing generated")
+                return False
+            if await switch.get_attribute('aria-checked') != 'true':
+                await switch.click(timeout=5000)
+            for _ in range(10):
+                if await switch.get_attribute('aria-checked') == 'true':
+                    self.logger.info(f"✅ {name}: on")
+                    return True
+                await self.page.wait_for_timeout(300)
+        except Exception as e:
+            self.logger.error(f"❌ Could not turn on '{name}': {e}")
+            return False
+        self.logger.error(f"❌ '{name}' did not turn on; nothing generated")
+        return False
+
+    # ------------------------------------------------------------------
+    # The review step: a plan read, saved, and sent on to render.
+    # ------------------------------------------------------------------
+
+    def _studio_panel(self):
+        return self.page.locator('section.studio-panel, .studio-panel, studio-panel').first
+
+    async def _find_paused_card(self, ref: Optional[str]) -> Optional[Dict[str, Any]]:
+        """One card stopped at a plan: by artifact id, or the only one when none is named."""
+        paused = await self._paused_cards()
+        if ref:
+            paused = [c for c in paused if c.get('artifact_id') == ref.strip()]
+            if not paused:
+                self.logger.error(f"❌ No Studio card {ref} is waiting for review")
+                return None
+            return paused[0]
+        if len(paused) == 1:
+            return paused[0]
+        if not paused:
+            self.logger.error("❌ No Studio card is waiting for review")
+        else:
+            ids = ', '.join(str(c.get('artifact_id')) for c in paused)
+            self.logger.error(f"❌ {len(paused)} cards are waiting for review; name one: {ids}")
+        return None
+
+    async def _open_review_panel(self, paused: Dict[str, Any]) -> bool:
+        """Press a paused card's Review. The plan opens in the Studio panel, not in a dialog."""
+        cards = await self.page.query_selector_all(ARTIFACT_CARD_SELECTOR)
+        index = paused.get('dom_index')
+        if index is None or index >= len(cards):
+            self.logger.error("❌ The paused card disappeared")
+            return False
+        button = await cards[index].query_selector(REVIEW_BUTTON_SELECTOR)
+        if not button:
+            self.logger.error("❌ The paused card has no Review button")
+            return False
+        await button.click()
+        try:
+            await self.page.wait_for_selector(PLAN_SELECTOR, timeout=15000, state='visible')
+        except Exception:
+            self.logger.error("❌ Review opened no plan")
+            return False
+        return True
+
+    async def _read_review_panel(self) -> Dict[str, Any]:
+        """The plan on screen: its step name, title, items, and its whole text."""
+        return await self.page.evaluate("""() => {
+            const clean = el => (el ? el.innerText : '').trim();
+            const plan = document.querySelector('.plan-viewer-container .a2ui-plan-container');
+            const active = document.querySelector('.plan-viewer-container .step-item-active .step-title');
+            const items = [...document.querySelectorAll('.plan-viewer-container .a2ui-outline-item')]
+                .map(item => clean(item.querySelector('.a2ui-outline-text') || item));
+            return {
+                step: clean(active),
+                steps: [...document.querySelectorAll('.plan-viewer-container .step-title')].map(clean),
+                title: clean(document.querySelector('.plan-viewer-container .a2ui-card-title-text')),
+                items,
+                text: clean(plan),
+            };
+        }""")
+
+    async def _close_review_panel(self) -> None:
+        """Leave the plan unsent: the panel's Close, which keeps the card paused."""
+        try:
+            close = self._studio_panel().locator('button[aria-label="Close"]').first
+            if await close.count():
+                await close.click(timeout=3000)
+                await self.page.wait_for_timeout(600)
+        except Exception as e:
+            self.logger.warning(f"⚠️ Could not close the review panel: {e}")
+
+    async def review_outline(self, ref: Optional[str], output_dir: str, notebook_id: str = None,
+                             seeded_from: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Read a paused card's plan and save it. Studio is left as it was, still paused."""
+        if not self.page:
+            self.logger.error("❌ No browser page available")
+            return None
+        if notebook_id and not await self.navigate_to_notebook(notebook_id=notebook_id):
+            return None
+        await self.dismiss_rebrand_modal()
+        paused = await self._find_paused_card(ref)
+        if not paused or not await self._open_review_panel(paused):
+            return None
+        try:
+            plan = await self._read_review_panel()
+        finally:
+            await self._close_review_panel()
+        if plan_is_empty(plan):
+            self.logger.error("❌ The plan on screen is empty; nothing saved")
+            return None
+        entry = save_outline(output_dir, plan, paused.get('artifact_id'), paused.get('family_label') or 'Artifact',
+                             notebook_id=notebook_id, seeded_from=seeded_from)
+        self.logger.info(f"📝 Plan saved: {entry['path']}")
+        return {'card': paused, 'plan': plan, 'entry': entry}
+
+    async def proceed_review(self, ref: str, output_dir: str, notebook_id: str = None,
+                             feedback: Optional[str] = None, wait: bool = True) -> Optional[Dict[str, Any]]:
+        """
+        Send a paused card on to render, with feedback or without.
+
+        This cannot be taken back: the deck or video renders at once and the
+        plan cannot be refined after. Sending feedback IS proceeding: Enter in
+        the feedback field closes the panel and renders with the feedback
+        applied, with no second plan to read (2026-11-05). So the plan and the
+        feedback are saved first, and nothing is pressed if either save fails.
+        """
+        if not self.page:
+            self.logger.error("❌ No browser page available")
+            return None
+        if notebook_id and not await self.navigate_to_notebook(notebook_id=notebook_id):
+            return None
+        await self.dismiss_rebrand_modal()
+        paused = await self._find_paused_card(ref)
+        if not paused:
+            return None
+        family = paused.get('family_label') or 'Artifact'
+        type_key = normalize_artifact_type(family) or family
+        # Read the finished cards now: the panel hides them, and a baseline taken
+        # behind it is empty, so the watch would return an older deck as the new one.
+        baseline = await self._completed_card_snapshot(type_key)
+        if not await self._open_review_panel(paused):
+            return None
+
+        plan = await self._read_review_panel()
+        if plan_is_empty(plan):
+            self.logger.error("❌ The plan on screen is empty; nothing saved and nothing sent")
+            await self._close_review_panel()
+            return None
+        try:
+            outline = save_outline(output_dir, plan, paused.get('artifact_id'), family, notebook_id=notebook_id)
+            kept_feedback = save_feedback(output_dir, outline, feedback) if feedback else None
+        except OSError as e:
+            self.logger.error(f"❌ Could not save the plan, so nothing was sent: {e}")
+            await self._close_review_panel()
+            return None
+        self.logger.info(f"📝 Plan saved: {outline['path']}")
+
+        started_at = time.time()
+        if feedback:
+            field = self.page.locator(f'{PLAN_SELECTOR} textarea').first
+            await field.fill(feedback)
+            await field.press('Enter')
+        else:
+            await self.page.locator(PLAN_SELECTOR).get_by_role('button', name='Proceed').first.click(timeout=5000)
+
+        # The card goes back to generating. Still paused means it was not accepted.
+        accepted = False
+        for _ in range(20):
+            await self.page.wait_for_timeout(1500)
+            if not await self.page.query_selector(PLAN_SELECTOR):
+                still = [c for c in await self._paused_cards() if c.get('artifact_id') == paused.get('artifact_id')]
+                if not still:
+                    accepted = True
+                    break
+        if not accepted:
+            limit = await self._daily_limit_on_page(type_key)
+            self.logger.error(f"❌ {limit or 'The card is still waiting for review'}; nothing was rendered")
+            self.last_generation_refusal = limit
+            await self._close_review_panel()
+            return None
+
+        stamp = datetime.now().isoformat(timespec='seconds')
+        record_proceed(output_dir, outline, proceeded_at=stamp, feedback_sent=bool(feedback))
+        result: Dict[str, Any] = {'outline': outline, 'feedback': kept_feedback, 'card': paused,
+                                  'proceeded_at': stamp, 'artifact': None}
+        if not wait:
+            return result
+
+        studio_config = self.config.get('STUDIO_SETTINGS', {}).get(type_key, {}) if hasattr(self, 'config') else {}
+        artifact = await self._monitor_artifact_generation(
+            started_at, studio_config.get('generation_timeout', 1800), studio_config.get('polling_interval', 5),
+            artifact_type=type_key, baseline_count=len(baseline),
+            baseline_keys={c['card_key'] for c in baseline},
+            start_timeout=studio_config.get('generation_start_timeout', GENERATION_START_TIMEOUT_S))
+        if not artifact:
+            self.logger.error("❌ The plan was sent on, and no finished card appeared within the watch")
+            return None
+        record_proceed(output_dir, outline, rendered_as={'artifact_id': artifact.get('artifact_id'),
+                                                         'title': artifact.get('title')})
+        result['artifact'] = artifact
+        return result
 
     async def _drive_report_dialog(self, format_display: Optional[str], template: Optional[str],
                                    language: Optional[str], focus_prompt: Optional[str]) -> bool:
@@ -3956,6 +4260,13 @@ class NotebookLMAutomator:
 
                 if artifact.get('generating'):
                     manifest['skipped'].append({'title': title, 'reason': f'{family_label}: still generating'})
+                    continue
+
+                if artifact.get('awaiting_review'):
+                    manifest['skipped'].append({
+                        'title': title, 'artifact_id': artifact.get('artifact_id'),
+                        'reason': f'{family_label}: waiting for review, nothing rendered yet; `studio outline` saves its plan',
+                    })
                     continue
 
                 if family_label == 'Reports':

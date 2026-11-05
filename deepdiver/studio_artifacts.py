@@ -32,7 +32,19 @@ ARTIFACT_CARD_SELECTOR = 'artifact-library-item'
 # enabled main button and a More menu. Its main button is disabled
 # (observed 2026-10-06), so every completion selector excludes that.
 GENERATING_CARD_MARKER = '.mat-mdc-button-disabled'
-READY_CARD_SELECTOR = f'{ARTIFACT_CARD_SELECTOR}:not(:has({GENERATING_CARD_MARKER}))'
+
+# A Slide Deck or Video Overview made with the review switch stops at a plan
+# (observed 2026-11-05): the card says "Outline ready", its main button is
+# enabled and it has a More menu, so it looks finished to everything above. It
+# is not. Nothing is rendered until someone presses Review, then Proceed.
+PENDING_REVIEW_MARKER = '.artifact-item-button-pending-review'
+REVIEW_BUTTON_SELECTOR = '.review-plan-button button'
+# Review opens the plan in the Studio panel, not in a dialog. A chat answer can
+# carry an a2ui card too, so the plan is read only inside this viewer.
+PLAN_SELECTOR = '.plan-viewer-container .a2ui-plan-container'
+READY_CARD_SELECTOR = (
+    f'{ARTIFACT_CARD_SELECTOR}:not(:has({GENERATING_CARD_MARKER})):not(:has({PENDING_REVIEW_MARKER}))'
+)
 
 ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
     'audio_overview': {
@@ -62,8 +74,11 @@ ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
         'supports_language': True,
         'supports_length': True,
         'supports_focus_prompt': True,
-        'downloadable': False,
+        # The card's menu offers PDF and PowerPoint (2026-11-05). Every slide of
+        # either is one image, so neither carries selectable text.
+        'downloadable': True,
         'playable': False,
+        'review_switch': 'Review slide outline',
     },
     'video_overview': {
         'label': 'Video Overview',
@@ -80,6 +95,7 @@ ARTIFACT_TYPES: Dict[str, Dict[str, Any]] = {
         'supports_focus_prompt': True,
         'downloadable': True,
         'playable': True,
+        'review_switch': 'Review producer notes',
     },
     'mind_map': {
         'label': 'Mind Map',

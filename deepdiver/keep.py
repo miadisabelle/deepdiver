@@ -10,7 +10,10 @@ download folder into what the episode commits:
 - a video or audio overview is re-encoded into `keep/`, the only place the
   chronicle's .gitignore lets `.mp4` and `.m4a` in (Episode 140's 31 MB video
   became 6.5 MB). The download stays beside it, out of git;
-- reports are kept as they are;
+- a slide deck PDF is recompressed into `keep/` and the download removed: its
+  pages are images, so nothing is lost to a text layer (a 6.8 MB deck became
+  770 KB on 2026-11-05);
+- reports and saved outlines are kept as they are;
 - each kept video or audio overview gets its transcript beside it,
   `keep/<name>.transcript.md`, so a person or an agent can review the
   explainer by its words and orchestrate the next version from them
@@ -36,10 +39,12 @@ from typing import Any, Dict, List, Optional
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg')
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.webm')
 AUDIO_EXTENSIONS = ('.m4a', '.mp3', '.wav')
+PDF_EXTENSIONS = ('.pdf',)
 
 WEBP_HOW = 'WebP, quality 90, no metadata (ffmpeg libwebp)'
 VIDEO_HOW = 'H.264 CRF 30 preset slow tune stillimage, AAC 64 kb/s, faststart, no metadata (ffmpeg)'
 AUDIO_HOW = 'AAC 64 kb/s, faststart, no metadata (ffmpeg)'
+PDF_HOW = 'PDF recompressed for reading (ghostscript /ebook)'
 
 
 def _sha256(path: str) -> str:
@@ -69,6 +74,19 @@ def _kept_record(folder: str, path: str, how: str) -> Dict[str, Any]:
         'sha256': _sha256(path),
         'how': how,
     }
+
+
+def _run_ghostscript(source: str, target: str) -> Optional[str]:
+    """Recompress a PDF; return None on success, or its error text."""
+    gs = shutil.which('gs')
+    if not gs:
+        return 'ghostscript (gs) not found'
+    proc = subprocess.run([gs, '-q', '-dNOPAUSE', '-dBATCH', '-sDEVICE=pdfwrite',
+                           '-dPDFSETTINGS=/ebook', f'-sOutputFile={target}', source],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        return (proc.stderr or proc.stdout).strip()[-400:] or f'gs exited {proc.returncode}'
+    return None
 
 
 TRANSCRIPT_HOW = 'faster-whisper {model}, English, machine transcription not checked'
@@ -157,6 +175,7 @@ def keep_entry(entry: Dict[str, Any], folder: str) -> Dict[str, Any]:
         **{e: (os.path.join(folder, f'{stem}.webp'), WEBP_HOW) for e in IMAGE_EXTENSIONS},
         **{e: (os.path.join(folder, 'keep', f'{stem}.mp4'), VIDEO_HOW) for e in VIDEO_EXTENSIONS},
         **{e: (os.path.join(folder, 'keep', f'{stem}.m4a'), AUDIO_HOW) for e in AUDIO_EXTENSIONS},
+        **{e: (os.path.join(folder, 'keep', f'{stem}.pdf'), PDF_HOW) for e in PDF_EXTENSIONS},
     }
     if ext in targets and os.path.exists(targets[ext][0]):
         # Kept already, by hand or by an earlier version: record it, never redo it.
@@ -176,6 +195,18 @@ def keep_entry(entry: Dict[str, Any], folder: str) -> Dict[str, Any]:
             entry['kept_error'] = error
             return entry
         entry['kept'] = _kept_record(folder, target, WEBP_HOW)
+        os.remove(source)
+        return entry
+
+    if ext in PDF_EXTENSIONS:
+        keep_dir = os.path.join(folder, 'keep')
+        os.makedirs(keep_dir, exist_ok=True)
+        target = os.path.join(keep_dir, f'{stem}.pdf')
+        error = _run_ghostscript(source, target)
+        if error:
+            entry['kept_error'] = error
+            return entry
+        entry['kept'] = _kept_record(folder, target, PDF_HOW)
         os.remove(source)
         return entry
 

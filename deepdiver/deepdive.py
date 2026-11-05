@@ -1226,10 +1226,27 @@ def studio_audio(format: Optional[str], language: str, length: Optional[str],
     asyncio.run(run_audio_generation())
 
 
+def _seeded_focus(focus: Optional[str], review: bool, from_outline: Optional[str],
+                  feedback_file: Optional[str]):
+    """The prompt and review flag for a run, seeded when it starts from a kept outline.
+
+    A seeded run stops at its own plan: that plan is the next version.
+    """
+    if feedback_file and not from_outline:
+        console.print("❌ --feedback goes with --from-outline; on a paused card use studio proceed -i", style="red")
+        sys.exit(2)
+    if not from_outline:
+        return focus, review
+    from .outline import compose_seed
+
+    feedback = Path(feedback_file).read_text(encoding='utf-8') if feedback_file else None
+    return compose_seed(from_outline, focus, feedback), True
+
+
 def _run_studio_generation(artifact_type: str, format: Optional[str], language: Optional[str],
                            length: Optional[str], focus: Optional[str],
                            notebook_id: Optional[str], cdp_url: Optional[str], config: str,
-                           template: Optional[str] = None):
+                           template: Optional[str] = None, review: bool = False):
     """Shared runner for non-audio Studio artifact generation commands.
 
     Exits 1 when nothing was generated, so agents running the binary can
@@ -1258,8 +1275,17 @@ def _run_studio_generation(artifact_type: str, format: Optional[str], language: 
                 focus_prompt=focus,
                 notebook_id=notebook_id,
                 template=template,
+                review=review,
             )
 
+            if artifact_data and artifact_data.get('status') == 'awaiting_review':
+                card = artifact_data.get('artifact_id', 'unknown')
+                console.print("⏸️ Plan ready, nothing rendered yet", style="green")
+                console.print(f"📋 Artifact ID: {card}", style="cyan")
+                console.print(f"⏱️ Took {artifact_data.get('generation_time', 0)}s", style="cyan")
+                console.print(f"   Save it:  deepdiver studio outline {card} -n <id> -o <dir>", style="dim")
+                console.print(f"   Render:   deepdiver studio proceed {card} -n <id> -o <dir> [-i feedback.md]", style="dim")
+                return True
             if artifact_data:
                 console.print(f"✅ Artifact generated successfully!", style="green")
                 console.print(f"📋 Artifact ID: {artifact_data.get('artifact_id', 'unknown')}", style="cyan")
@@ -1292,12 +1318,19 @@ def _run_studio_generation(artifact_type: str, format: Optional[str], language: 
 @click.option('--length', type=click.Choice(['short', 'default', 'long'], case_sensitive=False),
               help='Deck length')
 @click.option('--focus', help='Free-text deck brief (audience, tone, slide count, emphases)')
+@click.option('--review', is_flag=True, default=False,
+              help='Stop at the slide outline instead of rendering (see studio outline, studio proceed)')
+@click.option('--from-outline', type=click.Path(exists=True, dir_okay=False),
+              help='Seed the description from a kept outline; implies --review')
+@click.option('--feedback', 'feedback_file', type=click.Path(exists=True, dir_okay=False),
+              help='With --from-outline: a file of changes to make to that outline')
 @click.option('--notebook-id', '-n', help='Notebook ID (uses current page if not provided)')
 @cdp_url_option
 @click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
               help='Path to configuration file')
 def studio_slide_deck(format: Optional[str], language: Optional[str], length: Optional[str],
-                      focus: Optional[str], notebook_id: Optional[str],
+                      focus: Optional[str], review: bool, from_outline: Optional[str],
+                      feedback_file: Optional[str], notebook_id: Optional[str],
                       cdp_url: str, config: str):
     """Generate a Slide Deck through the Studio tile.
 
@@ -1308,10 +1341,12 @@ def studio_slide_deck(format: Optional[str], language: Optional[str], length: Op
     Example:
         deepdiver studio slide-deck --format presenter \\
           --focus "Explain the bridge architecture for new operators" -n abc-123
+        deepdiver studio slide-deck --review --focus "..." -n abc-123
     """
     console.print("🖼️ Generating Slide Deck...", style="blue")
+    focus, review = _seeded_focus(focus, review, from_outline, feedback_file)
     _run_studio_generation('slide_deck', format, language, length, focus,
-                           notebook_id, cdp_url, config)
+                           notebook_id, cdp_url, config, review=review)
 
 
 @studio.command(name='generate')
@@ -1321,12 +1356,19 @@ def studio_slide_deck(format: Optional[str], language: Optional[str], length: Op
 @click.option('--length', help='Length option when supported')
 @click.option('--focus', help='Free-text prompt when supported')
 @click.option('--template', '-t', help='Reports only: template name (see `studio report --help`)')
+@click.option('--review', is_flag=True, default=False,
+              help='Slide Deck and Video Overview: stop at the plan instead of rendering (see studio outline, studio proceed)')
+@click.option('--from-outline', type=click.Path(exists=True, dir_okay=False),
+              help='Seed the prompt from a kept outline; implies --review')
+@click.option('--feedback', 'feedback_file', type=click.Path(exists=True, dir_okay=False),
+              help='With --from-outline: a file of changes to make to that outline')
 @click.option('--notebook-id', '-n', help='Notebook ID (uses current page if not provided)')
 @cdp_url_option
 @click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
               help='Path to configuration file')
 def studio_generate(artifact_type: str, format: Optional[str], language: Optional[str],
                     length: Optional[str], focus: Optional[str], template: Optional[str],
+                    review: bool, from_outline: Optional[str], feedback_file: Optional[str],
                     notebook_id: Optional[str], cdp_url: str, config: str):
     """Generate any Studio artifact family by name.
 
@@ -1338,6 +1380,7 @@ def studio_generate(artifact_type: str, format: Optional[str], language: Optiona
         deepdiver studio generate mind_map -n abc-123
         deepdiver studio generate quiz --focus "Focus on chapter 3" -n abc-123
         deepdiver studio generate video_overview --language French -n abc-123
+        deepdiver studio generate video_overview --review --focus "..." -n abc-123
     """
     if normalize_artifact_type(artifact_type) is None:
         console.print(f"❌ Unknown artifact type: {artifact_type}", style="red")
@@ -1345,8 +1388,9 @@ def studio_generate(artifact_type: str, format: Optional[str], language: Optiona
         return
 
     console.print(f"🎨 Generating Studio artifact: {artifact_type}", style="blue")
+    focus, review = _seeded_focus(focus, review, from_outline, feedback_file)
     _run_studio_generation(artifact_type, format, language, length, focus,
-                           notebook_id, cdp_url, config, template=template)
+                           notebook_id, cdp_url, config, template=template, review=review)
 
 
 @studio.command(name='report')
@@ -1479,10 +1523,15 @@ def studio_list(notebook_id: Optional[str], cdp_url: str, config: str):
                 title = artifact.get('title') or 'Untitled'
                 spec = get_artifact_spec(family)
                 marks = []
-                if artifact.get('playable'):
-                    marks.append('▶️ playable')
-                if spec and spec.get('downloadable'):
-                    marks.append('⬇️ downloadable')
+                if artifact.get('awaiting_review'):
+                    marks.append(f"⏸️ waiting for review · {artifact.get('artifact_id')}")
+                elif artifact.get('generating'):
+                    marks.append('⏳ generating')
+                else:
+                    if artifact.get('playable'):
+                        marks.append('▶️ playable')
+                    if spec and spec.get('downloadable'):
+                        marks.append('⬇️ downloadable')
                 console.print(f"  • [{family}] {title} {' · '.join(marks) or '—'}", style="cyan")
                 if artifact.get('details'):
                     console.print(f"      {artifact['details']}", style="dim")
@@ -1604,11 +1653,13 @@ def _print_kept(folder: str, transcripts: bool = True) -> bool:
 @click.option('--notebook-id', '-n', help='Notebook ID (uses current page if not provided)')
 @click.option('--dry-run', is_flag=True, default=False,
               help="Fill the card's Iterate dialog, read it back and close it without generating")
+@click.option('--review', is_flag=True, default=False,
+              help='Stop the new version at its plan instead of rendering it')
 @cdp_url_option
 @click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
               help='Path to configuration file')
 def studio_iterate(artifact: str, instruction_file: str, notebook_id: Optional[str], dry_run: bool,
-                   cdp_url: str, config: str):
+                   review: bool, cdp_url: str, config: str):
     """Make a new version of an artifact from its own prompt, revised.
 
     ARTIFACT is the card's artifact id or exact title. Where the card's
@@ -1637,7 +1688,7 @@ def studio_iterate(artifact: str, instruction_file: str, notebook_id: Optional[s
             console.print("❌ Failed to connect to browser", style="red")
             return False
         result = await automator.iterate_studio_artifact(artifact, instruction, notebook_id=notebook_id,
-                                                         dry_run=dry_run)
+                                                         dry_run=dry_run, review=review)
         if not result:
             return False
         origin = result['iterated_from']
@@ -1656,6 +1707,106 @@ def studio_iterate(artifact: str, instruction_file: str, notebook_id: Optional[s
         return True
 
     if not asyncio.run(run_iterate()):
+        sys.exit(1)
+
+
+def _print_plan(plan: dict) -> None:
+    console.print(f"[{plan.get('step') or 'Plan'}] {plan.get('title') or ''}", style="bold")
+    for number, item in enumerate(plan.get('items') or [], 1):
+        console.print(f"  {number}. {item}", markup=False)
+    if not plan.get('items'):
+        console.print(plan.get('text') or '', markup=False)
+
+
+@studio.command(name='outline')
+@click.argument('artifact', required=False)
+@click.option('--output', '-o', required=True, help="Folder that keeps the plan, beside the notebook's media")
+@click.option('--notebook-id', '-n', help='Notebook ID (uses current page if not provided)')
+@cdp_url_option
+@click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
+              help='Path to configuration file')
+def studio_outline(artifact: Optional[str], output: str, notebook_id: Optional[str], cdp_url: str, config: str):
+    """Save a paused card's outline or producer notes, and print them.
+
+    ARTIFACT is the card's id, from `studio list` or the run that made it. It
+    may be left out when one card is waiting. The card stays paused, so this
+    can run any number of times; the same plan is not saved twice. Each new plan
+    in a folder is the next version, outline-<NN>-<card>.md, listed in
+    manifest.json where the episode room reads it.
+
+    Example:
+        deepdiver studio outline 26192ae5-88f2-4443-b870-8c0df3cc4e41 -n abc-123 -o <dir>
+    """
+    from .notebooklm_automator import NotebookLMAutomator
+
+    async def run():
+        automator = NotebookLMAutomator(config, cdp_url_override=cdp_url)
+        if not await automator.connect_to_browser():
+            console.print("❌ Failed to connect to browser", style="red")
+            return False
+        result = await automator.review_outline(artifact, output, notebook_id=notebook_id)
+        if not result:
+            return False
+        _print_plan(result['plan'])
+        console.print(f"✅ Saved {result['entry']['path']} (v{result['entry']['outline_version']}); "
+                      f"card {result['card'].get('artifact_id')} is still waiting", style="green")
+        return True
+
+    if not asyncio.run(run()):
+        sys.exit(1)
+
+
+@studio.command(name='proceed')
+@click.argument('artifact')
+@click.option('--output', '-o', required=True, help="Folder that keeps the plan, beside the notebook's media")
+@click.option('--instruction', '-i', 'feedback_file', type=click.Path(exists=True, dir_okay=False),
+              help='File of feedback, applied to the render; Studio offers one round of it')
+@click.option('--no-wait', is_flag=True, default=False, help='Return once the render has started')
+@click.option('--notebook-id', '-n', help='Notebook ID (uses current page if not provided)')
+@cdp_url_option
+@click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
+              help='Path to configuration file')
+def studio_proceed(artifact: str, output: str, feedback_file: Optional[str], no_wait: bool,
+                   notebook_id: Optional[str], cdp_url: str, config: str):
+    """Send a paused card on to render. This cannot be taken back.
+
+    The plan and the feedback are saved first. Sending feedback renders at once
+    with it applied, with no second plan to read, and Studio afterwards shows
+    neither: "Prompt and sources" holds only the first prompt. To read another
+    plan before rendering, start a new run with `studio generate --from-outline`.
+
+    Example:
+        deepdiver studio proceed 26192ae5-88f2-4443-b870-8c0df3cc4e41 -n abc-123 -o <dir> -i feedback.md
+    """
+    from .notebooklm_automator import NotebookLMAutomator
+
+    feedback = None
+    if feedback_file:
+        feedback = Path(feedback_file).read_text(encoding='utf-8').strip()
+        if not feedback:
+            console.print(f"❌ {feedback_file} is empty", style="red")
+            sys.exit(1)
+
+    async def run():
+        automator = NotebookLMAutomator(config, cdp_url_override=cdp_url)
+        if not await automator.connect_to_browser():
+            console.print("❌ Failed to connect to browser", style="red")
+            return False
+        result = await automator.proceed_review(artifact, output, notebook_id=notebook_id,
+                                                feedback=feedback, wait=not no_wait)
+        if not result:
+            return False
+        console.print(f"📝 Plan kept: {result['outline']['path']}", style="cyan")
+        if result.get('feedback'):
+            console.print(f"📝 Feedback kept: {result['feedback']['path']}", style="cyan")
+        if result.get('artifact'):
+            console.print(f"✅ Rendered: {result['artifact'].get('title')} · {result['artifact'].get('artifact_id')}",
+                          style="green")
+        else:
+            console.print("⏳ Rendering; `studio list` shows it", style="green")
+        return True
+
+    if not asyncio.run(run()):
         sys.exit(1)
 
 
