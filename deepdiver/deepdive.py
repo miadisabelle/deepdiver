@@ -1509,7 +1509,8 @@ def studio_download(notebook_id: Optional[str], output: Optional[str], keep: boo
 
     ⬇️ The end-of-run export: every downloadable artifact lands in the
     output directory with a manifest.json (title, path, sha256, size, media
-    probe) — ready to ship to other devices.
+    probe) — ready to ship to other devices. A folder that already has a
+    manifest.json gets only the cards it does not hold yet.
 
     Example:
         deepdiver studio download -n abc-123 -o ./output/artifacts/run-42
@@ -1543,8 +1544,11 @@ def studio_download(notebook_id: Optional[str], output: Optional[str], keep: boo
                 console.print(f"❌ {manifest['error']}", style="red")
                 return False
 
-            console.print(f"✅ Downloaded {len(manifest['downloads'])} artifact(s)", style="green")
-            for entry in manifest['downloads']:
+            fresh = manifest.get('fresh', manifest['downloads'])
+            console.print(f"✅ Downloaded {len(fresh)} new artifact(s)", style="green")
+            if manifest.get('already'):
+                console.print(f"📁 Already in this folder: {len(manifest['already'])}", style="dim")
+            for entry in fresh:
                 size_mb = entry['size'] / (1024 * 1024)
                 console.print(f"  • {entry['title']} → {entry['path']} ({size_mb:.1f} MB)", style="cyan")
             if manifest['skipped']:

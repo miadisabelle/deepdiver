@@ -128,6 +128,23 @@ def match_source_titles(titles: List[str], wanted: str) -> List[int]:
     return []
 
 
+def card_is_held(card: Dict[str, Any], entries: List[Dict[str, Any]]) -> bool:
+    """Does a manifest entry already hold this Studio card?
+
+    By the card's id. Only a card or an entry with no id falls back to its
+    title, since Gemini Notebook can give two cards one title.
+    """
+    card_id = card.get('artifact_id')
+    for entry in entries:
+        entry_id = entry.get('artifact_id')
+        if card_id and entry_id:
+            if card_id == entry_id:
+                return True
+        elif card.get('title') and card.get('title') == entry.get('title'):
+            return True
+    return False
+
+
 def match_studio_cards(cards: List[Dict[str, Any]], ref: str) -> List[Dict[str, Any]]:
     """The Studio cards an iterate names: by artifact id, else by exact title."""
     want = (ref or '').strip()
@@ -3843,6 +3860,20 @@ class NotebookLMAutomator:
         except Exception:
             return None
 
+    def _read_prior_manifest(self, manifest_path: str) -> Dict[str, Any]:
+        """The folder's manifest.json, or nothing when it has none or cannot be read."""
+        import json as _json
+
+        if not os.path.exists(manifest_path):
+            return {}
+        try:
+            with open(manifest_path, encoding='utf-8') as f:
+                prior = _json.load(f)
+            return prior if isinstance(prior, dict) else {}
+        except (OSError, ValueError) as e:
+            self.logger.warning(f"⚠️ Could not read {manifest_path}: {e}")
+            return {}
+
     async def download_all_artifacts(
         self,
         output_dir: str,
@@ -3857,24 +3888,36 @@ class NotebookLMAutomator:
         recording title, path, sha256, and byte size — the shape cross-device
         sync tooling needs to ship artifacts to other nodes.
 
+        A folder whose manifest.json already holds a card is not sent it again:
+        only new cards are downloaded, and they join the manifest's downloads
+        (2026-10-30 and 2026-11-03: every run fetched and re-encoded each
+        artifact under a new name and overwrote the manifest). A new folder
+        gets everything.
+
         Args:
             output_dir: Directory for downloaded files + manifest.json
             notebook_id: Navigate to this notebook first (uses current page
                          if None)
 
         Returns:
-            Manifest dict: notebook_id, downloads[], skipped[], manifest_path.
+            Manifest dict: notebook_id, downloads[], skipped[], manifest_path,
+            and for the caller, not written to the file, fresh[] (this run's
+            downloads) and already[] (titles the folder holds).
         """
         import json as _json
 
         os.makedirs(output_dir, exist_ok=True)
+        manifest_path = os.path.join(output_dir, 'manifest.json')
+        prior = self._read_prior_manifest(manifest_path)
         manifest: Dict[str, Any] = {
             'notebook_id': notebook_id,
-            'created_at': datetime.now().isoformat(),
-            'downloads': [],
+            'created_at': prior.get('created_at') or datetime.now().isoformat(),
+            'downloads': list(prior.get('downloads') or []),
             'skipped': [],   # the card offers no Download
             'failed': [],    # a download was attempted and did not land
         }
+        held = list(manifest['downloads'])
+        already: List[str] = []
 
         if notebook_id:
             if not await self.navigate_to_notebook(notebook_id=notebook_id):
@@ -3888,6 +3931,10 @@ class NotebookLMAutomator:
         for index, artifact in enumerate(artifacts):
             title = artifact.get('title') or f'artifact-{index + 1}'
             family_label = artifact.get('family_label') or 'Artifact'
+
+            if card_is_held(artifact, held):
+                already.append(title)
+                continue
 
             safe_title = ''.join(
                 ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in title.strip()
@@ -3965,11 +4012,12 @@ class NotebookLMAutomator:
                 manifest['failed'].append({'title': title, 'reason': repr(e)})
                 self.logger.warning(f"⚠️ Download failed for {title}: {e}")
 
-        manifest_path = os.path.join(output_dir, 'manifest.json')
         try:
             with open(manifest_path, 'w', encoding='utf-8') as f:
                 _json.dump(manifest, f, indent=2, ensure_ascii=False)
             manifest['manifest_path'] = manifest_path
+            manifest['fresh'] = manifest['downloads'][len(held):]
+            manifest['already'] = already
             self.logger.info(f"🗂️ Manifest written: {manifest_path}")
         except Exception as e:
             self.logger.warning(f"⚠️ Could not write manifest: {e}")
