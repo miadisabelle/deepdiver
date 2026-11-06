@@ -54,6 +54,7 @@ deepdiver studio generate video_overview --review --focus "..." -n <id>   # stop
 deepdiver studio outline <card id> -n <id> -o <dir>   # save a paused card's plan as outline-<NN>-<card>.md; the card stays paused
 deepdiver studio proceed <card id> -n <id> -o <dir> [-i feedback.md]   # save the plan and feedback, then render; cannot be taken back
 deepdiver studio slide-deck --from-outline <dir>/outline-01-<card>.md [--feedback f.md] -n <id>   # next version: a new run seeded from a kept plan, stopped at its own plan
+deepdiver studio outline <new card id> -n <id> -o <dir> --seeded-from outline-01-<card>.md   # save it with its seed, so the notebook door links the two versions on the wheel
 deepdiver studio list -n <id>                   # artifact cards currently visible
 deepdiver studio download -n <id> -o <dir>      # every downloadable card + reports as .md/.html + manifest.json
 deepdiver studio download -n <id> -o <dir> --keep   # also WebP infographics, video/audio re-encoded into keep/, "kept" in manifest.json

@@ -1721,11 +1721,13 @@ def _print_plan(plan: dict) -> None:
 @studio.command(name='outline')
 @click.argument('artifact', required=False)
 @click.option('--output', '-o', required=True, help="Folder that keeps the plan, beside the notebook's media")
+@click.option('--seeded-from', help='The kept plan this run was seeded from, so the wheel can link the two versions')
 @click.option('--notebook-id', '-n', help='Notebook ID (uses current page if not provided)')
 @cdp_url_option
 @click.option('--config', '-c', default='deepdiver/deepdiver.yaml',
               help='Path to configuration file')
-def studio_outline(artifact: Optional[str], output: str, notebook_id: Optional[str], cdp_url: str, config: str):
+def studio_outline(artifact: Optional[str], output: str, seeded_from: Optional[str], notebook_id: Optional[str],
+                   cdp_url: str, config: str):
     """Save a paused card's outline or producer notes, and print them.
 
     ARTIFACT is the card's id, from `studio list` or the run that made it. It
@@ -1744,7 +1746,8 @@ def studio_outline(artifact: Optional[str], output: str, notebook_id: Optional[s
         if not await automator.connect_to_browser():
             console.print("❌ Failed to connect to browser", style="red")
             return False
-        result = await automator.review_outline(artifact, output, notebook_id=notebook_id)
+        result = await automator.review_outline(artifact, output, notebook_id=notebook_id,
+                                                seeded_from=os.path.basename(seeded_from) if seeded_from else None)
         if not result:
             return False
         _print_plan(result['plan'])

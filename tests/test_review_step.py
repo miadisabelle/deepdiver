@@ -249,6 +249,14 @@ def test_review_saves_the_plan_and_leaves_the_card_paused(tmp_path):
     assert '2. Actors: who checks what.' in text
 
 
+def test_review_records_the_plan_a_run_was_seeded_from(tmp_path):
+    # The notebook door reads this to link two versions on the wheel (jgwill/Miadi#940).
+    async def body(a, _):
+        return await a.review_outline(None, str(tmp_path), seeded_from='outline-01-26192ae5.md')
+    entry = run(page_html(paused_card()), body)['entry']
+    assert entry['seeded_from'] == 'outline-01-26192ae5.md'
+
+
 def test_review_names_a_card_when_several_wait(tmp_path, caplog):
     other = paused_card('77e0c81f-1ca9-4de5-9952-3c7e102b3d89')
     async def body(a, _):
