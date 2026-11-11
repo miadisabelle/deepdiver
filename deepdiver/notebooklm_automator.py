@@ -1240,6 +1240,11 @@ class NotebookLMAutomator:
         'button[aria-label="Close data table"]',
         'button[aria-label^="Close "][aria-label$="overview"]',
         'artifact-viewer button[aria-label="Close"]',
+        # A paused plan (producer notes, an outline) opened by `studio outline`
+        # fills the Studio panel; its header button is "Close" (collapse_content).
+        # Only while a Proceed button shows, so the normal panel is never collapsed
+        # (2026-11-10, notebook 7bf33cea: two generations found no dialog).
+        'section.studio-panel:has(button:has-text("Proceed")) .panel-header button[aria-label="Close"]',
     )
 
     async def close_open_artifact_viewer(self) -> bool:
